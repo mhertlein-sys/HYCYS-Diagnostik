@@ -378,7 +378,36 @@ def create_hycys_excel_lauf(
     import openpyxl
     import io
 
-    template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "HYCYS - Auswertung Lauf.xlsx")
+    # Robuste Template-Suche (Hauptordner oder Unterordner, Groß-/Kleinschreibung)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, "HYCYS - Auswertung Lauf.xlsx"),
+        os.path.join(base_dir, "Lauf Auswertungen", "HYCYS - Auswertung Lauf.xlsx"),
+        os.path.join(base_dir, "HYCYS_Auswertung_Lauf.xlsx"),
+        os.path.join(base_dir, "HYCYS-Auswertung Lauf.xlsx"),
+    ]
+    template_path = None
+    for c in candidates:
+        if os.path.isfile(c):
+            template_path = c
+            break
+
+    if not template_path:
+        # Fallback: Ordner nach passender .xlsx durchsuchen
+        for root, dirs, files in os.walk(base_dir):
+            for f in files:
+                if "hycys" in f.lower() and "lauf" in f.lower() and f.lower().endswith(".xlsx") and not f.startswith("~$"):
+                    template_path = os.path.join(root, f)
+                    break
+            if template_path:
+                break
+
+    if not template_path or not os.path.isfile(template_path):
+        raise FileNotFoundError(
+            f"Vorlage 'HYCYS - Auswertung Lauf.xlsx' wurde auf dem Server nicht gefunden. "
+            f"Gesucht in: {candidates[0]}"
+        )
+
     wb = openpyxl.load_workbook(template_path)
     ws = wb["Eingabedaten"]
 
@@ -531,9 +560,35 @@ def create_hycys_excel_rad(
     import openpyxl
     import io
 
-    template_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "Radsport Auswertungen", "HYCYS - Auswertung Rad.xlsx"
-    )
+    # Robuste Template-Suche für Radsport-Vorlage
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, "Radsport Auswertungen", "HYCYS - Auswertung Rad.xlsx"),
+        os.path.join(base_dir, "HYCYS - Auswertung Rad.xlsx"),
+        os.path.join(base_dir, "HYCYS_Auswertung_Rad.xlsx"),
+        os.path.join(base_dir, "HYCYS-Auswertung Rad.xlsx"),
+    ]
+    template_path = None
+    for c in candidates:
+        if os.path.isfile(c):
+            template_path = c
+            break
+
+    if not template_path:
+        for root, dirs, files in os.walk(base_dir):
+            for f in files:
+                if "hycys" in f.lower() and "rad" in f.lower() and f.lower().endswith(".xlsx") and not f.startswith("~$"):
+                    template_path = os.path.join(root, f)
+                    break
+            if template_path:
+                break
+
+    if not template_path or not os.path.isfile(template_path):
+        raise FileNotFoundError(
+            f"Vorlage 'HYCYS - Auswertung Rad.xlsx' wurde auf dem Server nicht gefunden. "
+            f"Gesucht in: {candidates[0]}"
+        )
+
     wb = openpyxl.load_workbook(template_path)
     ws = wb["Eingabedaten"]
 
