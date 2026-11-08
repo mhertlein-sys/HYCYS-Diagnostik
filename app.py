@@ -117,17 +117,30 @@ st.set_page_config(page_title="HYCYS - Diagnostik", layout="wide")
 
 st.markdown("""
     <style>
-    button[kind="primary"] {
-        background-color: #00a1e0 !important;
+    /* HYCYS Primary Buttons ("Auswertung starten", etc.) */
+    button[kind="primary"],
+    .stButton > button[kind="primary"],
+    div[data-testid="stFormSubmitButton"] > button {
+        background-color: #2cb7b9 !important;
         color: white !important;
         border: none !important;
         width: 100% !important;
         font-weight: bold !important;
     }
+    button[kind="primary"]:hover,
+    .stButton > button[kind="primary"]:hover,
+    div[data-testid="stFormSubmitButton"] > button:hover {
+        background-color: #259fa0 !important;
+        color: white !important;
+    }
     [data-testid="stFileUploader"] button {
-        background-color: #00a1e0 !important;
+        background-color: #2cb7b9 !important;
         color: white !important;
         border: none !important;
+    }
+    [data-testid="stFileUploader"] button:hover {
+        background-color: #259fa0 !important;
+        color: white !important;
     }
     /* Schieberegler (st.slider) in HYCYS Türkis (#2cb7b9) statt Standard-Rot */
     div[data-baseweb="slider"] div[role="slider"] {
@@ -140,9 +153,38 @@ st.markdown("""
         color: #2cb7b9 !important;
         font-weight: 700 !important;
     }
-    div[data-baseweb="slider"] > div > div > div:first-child {
+    div[data-baseweb="slider"] > div > div > div:first-child,
+    div[data-baseweb="slider"] [data-testid="stSliderTickBar"] + div,
+    div[data-baseweb="slider"] div[style*="background-color: rgb(255, 75, 75)"] {
         background: #2cb7b9 !important;
         background-color: #2cb7b9 !important;
+    }
+    /* Alle Metrik-Deltas (Potenzial-Änderungen) in HYCYS Türkis statt Rot/Grün */
+    [data-testid="stMetricDelta"] svg {
+        fill: #2cb7b9 !important;
+    }
+    [data-testid="stMetricDelta"] > div {
+        color: #2cb7b9 !important;
+        font-weight: 700 !important;
+    }
+    /* Radio Buttons (z. B. LTP2 vs OBLA 4.0, Ansichtsauswahl) in HYCYS Türkis (#2cb7b9) statt Rot */
+    div[data-testid="stRadio"] div[role="radiogroup"] label div:first-child[aria-checked="true"],
+    div[data-testid="stRadio"] label div[role="radio"][aria-checked="true"],
+    div[data-baseweb="radio"] input:checked + div,
+    div[data-baseweb="radio"] div[aria-checked="true"] {
+        border-color: #2cb7b9 !important;
+        background-color: #2cb7b9 !important;
+    }
+    div[data-baseweb="radio"] input:checked + div > div,
+    div[data-testid="stRadio"] div[role="radiogroup"] label div:first-child[aria-checked="true"] > div {
+        background-color: #ffffff !important;
+    }
+    div[data-baseweb="radio"]:hover input + div,
+    div[data-testid="stRadio"] label:hover div[role="radio"] {
+        border-color: #2cb7b9 !important;
+    }
+    div[data-baseweb="radio"] input:focus + div {
+        box-shadow: 0 0 0 0.2rem rgba(44, 183, 185, 0.25) !important;
     }
     </style>
     """, unsafe_allow_html=True)
