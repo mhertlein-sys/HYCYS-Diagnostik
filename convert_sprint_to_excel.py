@@ -50,116 +50,194 @@ def parse_srm7_header(data):
     """Liest den SRM7-Header und gibt ein Dict mit Metadaten zurück."""
     if data[:4] != b'SRM7':
         raise ValueError("Keine gültige SRM7-Datei (falsche Magic Bytes)")
-    
+
     days_raw   = struct.unpack_from('<H', data, 4)[0]
     wheel_circ = struct.unpack_from('<H', data, 6)[0]   # mm
     rec_num    = data[8]    # Aufzeichnungsintervall Zähler
     rec_den    = data[9]    # Aufzeichnungsintervall Nenner
     rec_int    = rec_num / rec_den  # Sekunden pro Sample (z.B. 0.1)
-    n_chunks   = struct.unpack_from('<H', data, 10)[0]
-    n_blocks   = struct.unpack_from('<H', data, 12)[0]
-    n_markers  = data[14]
-    
+    n_blocks   = struct.unpack_from('<H', data, 10)[0]  # Anzahl 6-Byte-Datenblöcke
+    n_markers  = struct.unpack_from('<H', data, 12)[0]  # Anzahl zusätzlicher Marker (Gesamtmarker = n_markers + 1)
+    comment_len = data[14]                              # Länge des Notiz-Strings
+
     # Datum berechnen (Tage seit 01.01.1880)
     base_date = datetime.date(1880, 1, 1)
     record_date = base_date + datetime.timedelta(days=days_raw)
-    
-    # Athletenname aus Marker 0 (offset 86, erste 64 Bytes)
-    athlete_name = data[86:150].rstrip(b'\x00').decode('latin1', errors='replace').strip()
-    # Notiz aus Marker 0 ab Offset 16
-    notes = data[16:86].rstrip(b'\x00').decode('latin1', errors='replace').strip()
-    
+
+    # Athletenname (Header-Feld ab Offset 86, 255 Bytes im ersten Marker)
+    athlete_name = data[86:150].split(b'\x00')[0].decode('latin1', errors='replace').strip()
+    # Notiz / Comment (Offset 15..15+comment_len)
+    if 0 < comment_len <= 70:
+        notes = data[15:15 + comment_len].decode('latin1', errors='replace').strip()
+    else:
+        notes = data[15:84].split(b'\x00')[0].decode('latin1', errors='replace').strip()
+
+    # Block-Tabelle und Kalibrierungs-Header auslesen
+    block_base = 86 + (n_markers + 1) * 270
+    calib_off  = block_base + n_blocks * 6
+    blocks     = []
+    zero_off_hdr = 0
+    slope_hdr    = 0
+    rec_cnt_hdr  = 0
+    if calib_off + 6 <= len(data):
+        for b_idx in range(n_blocks):
+            boff = block_base + b_idx * 6
+            hsec_midnight, chunk_cnt = struct.unpack_from('<IH', data, boff)
+            blocks.append((hsec_midnight, chunk_cnt))
+        zero_off_hdr, slope_hdr, rec_cnt_hdr = struct.unpack_from('<HHH', data, calib_off)
+
     return {
-        'rec_int': rec_int,
+        'rec_int':       rec_int,
         'wheel_circ_mm': wheel_circ,
-        'n_markers': n_markers,
-        'n_blocks': n_blocks,
-        'n_chunks': n_chunks,
-        'record_date': record_date,
-        'athlete_name': athlete_name,
-        'notes': notes,
+        'n_markers':     n_markers,
+        'n_blocks':      n_blocks,
+        'n_chunks':      rec_cnt_hdr if rec_cnt_hdr > 0 else n_blocks,
+        'record_date':   record_date,
+        'athlete_name':  athlete_name,
+        'notes':         notes,
         'marker_offset': 86,
-        'marker_size': 270,
-        'block_size': 6,
+        'marker_size':   270,
+        'block_size':    6,
+        'blocks':        blocks,
+        'zero_off_hdr':  zero_off_hdr,
+        'slope_hdr':     round(slope_hdr / 305.57, 2) if slope_hdr > 0 else 0.0,
+        'rec_cnt_hdr':   rec_cnt_hdr,
+        'data_offset':   calib_off + 6,
     }
+
+
+def _find_srm7_data_start(data):
+    """
+    Findet den exakten Beginn der 14-Byte-Datenrecords in einer SRM7-Datei.
+
+    Strategie 1 (Exakte SRM7-Binärspezifikation):
+      86 Bytes Dateiheader
+      + (n_markers + 1) * 270 Bytes Marker-Tabelle
+      + n_blocks * 6 Bytes Block-Zeitstempel-Tabelle
+      + 6 Bytes Kalibrierung (zero_offset, slope, rec_cnt)
+    """
+    RECORD_SIZE = 14
+    if len(data) >= 16 and data[:4] == b'SRM7':
+        n_blocks  = struct.unpack_from('<H', data, 10)[0]
+        n_markers = struct.unpack_from('<H', data, 12)[0]
+        calib_off = 86 + (n_markers + 1) * 270 + n_blocks * 6
+        data_off  = calib_off + 6
+        if calib_off + 6 <= len(data):
+            _, _, rec_cnt = struct.unpack_from('<HHH', data, calib_off)
+            if rec_cnt > 0 and data_off + rec_cnt * RECORD_SIZE <= len(data):
+                return data_off
+
+    # Strategie 2 (Fallback-Signatursuche):
+    SIGNATURES = [
+        bytes([0x00, 0x82, 0x00, 0x00, 0x00, 0x8C]),
+        bytes([0x00, 0x28, 0x00, 0x00, 0x00, 0x8C]),
+    ]
+    MIN_CONSECUTIVE = 8
+
+    n_markers_real = struct.unpack_from('<H', data, 12)[0]
+    search_from    = 154 + n_markers_real * 270
+    search_to      = min(search_from + 1200, len(data) - RECORD_SIZE)
+
+    for start in range(search_from, search_to):
+        for sig in SIGNATURES:
+            n_valid = 0
+            for i in range(MIN_CONSECUTIVE + 5):
+                off = start + i * RECORD_SIZE
+                if off + RECORD_SIZE > len(data):
+                    break
+                if data[off + 8: off + 13] == sig[:5]:
+                    n_valid += 1
+                else:
+                    break
+            if n_valid >= MIN_CONSECUTIVE:
+                return start
+
+    n_markers_byte14 = data[14]
+    n_blocks_hdr     = struct.unpack_from('<H', data, 12)[0]
+    return 86 + n_markers_byte14 * 270 + n_blocks_hdr * 6
 
 
 def parse_srm7_data(data, slope=1.0, zero_offset=0.0, trim_zeros=True):
     """
-    Liest alle Datenpunkte aus einer SRM7-Datei.
-    
-    Die SRM7-Datei speichert Rohwerte in 14-Byte-Records:
-    - Bytes 0: 0x00 (Marker)
-    - Bytes 1-2: Rohleistung (uint16 LE) 
-    - Bytes 3-4: Rohkadenz (uint16 LE)
-    - Bytes 5-6: weitere Daten
-    - Bytes 7-13: Trennzeichen-Muster (0x00 0x82 ...)
-    
-    Formel: P [W] = (raw - zero_offset) * slope
-    
-    HINWEIS: Das SRM PowerControl speichert bereits berechnete Wattwerte.
-    Mit den Standard-Werten slope=1.0, offset=0 werden die raw-Werte direkt
-    als Watt interpretiert. Slope und Offset müssen vom SRM-Gerät abgelesen werden.
-    
-    trim_zeros=True: Führende Null-Leistungswerte (Vorlauf ohne Treten)
-    werden automatisch entfernt. Die Zeit wird neu ab 0 gezählt.
-    
-    Returns: Liste von Dicts mit elapsed_s, power_w, cadence, hr
+    Liest alle Datenpunkte aus einer SRM7-Datei (universell: Ergometer + Portable).
+
+    14-Byte-Record-Format (SRM7 Spezifikation):
+      Byte 0    : Status-Byte
+      Bytes 1-2 : Leistung [W] als uint16 LE
+      Byte 3    : Trittfrequenz [rpm] als uint8
+      Byte 4    : Herzfrequenz [bpm] als uint8
+      Bytes 5-8 : Geschwindigkeit [mm/s] als int32 LE (km/h = mm/s * 3.6 / 1000)
+      Bytes 9-12: Höhe [m] als int32 LE
+      Byte 13   : Temperatur [0.1 °C] als int8
+
+    trim_zeros=True: Führende UND nachfolgende Null-Leistungswerte (Vor-/Nachlauf ohne Leistung)
+    werden entfernt; die Zeit beginnt exakt bei 0:00:00.00 am ersten Leistungswert und nutzt
+    die exakten SRM7-Block-Zeitstempel (identisch zum SRM-ASCII/Excel-Export).
+
+    Returns: (records, hdr)
+      records : Liste von Dicts mit elapsed_s, step_s, t_abs, power_w, cadence, heart_rate, speed_kmh
+      hdr     : Dict mit Metadaten aus dem Header
     """
-    hdr = parse_srm7_header(data)
-    rec_int = hdr['rec_int']
-    n_markers = hdr['n_markers']
-    n_blocks = hdr['n_blocks']
-    
-    # Datensection berechnen
-    data_offset = 86 + n_markers * 270 + n_blocks * 6
+    hdr        = parse_srm7_header(data)
+    rec_int    = hdr['rec_int']
+    RECORD_SZ  = 14
+
+    data_offset  = _find_srm7_data_start(data)
     data_section = data[data_offset:]
-    
-    record_size = 14  # empirisch ermittelt für SRM7
-    n_records = len(data_section) // record_size
-    
+    n_records    = len(data_section) // RECORD_SZ
+    if hdr.get('rec_cnt_hdr', 0) > 0:
+        n_records = min(n_records, hdr['rec_cnt_hdr'])
+
+    # Block-Zeitstempel für jeden Record rekonstruieren (exakt wie SRMWin Export)
+    rec_abs_times = []
+    for hsec_midnight, chunk_cnt in hdr.get('blocks', []):
+        base_sec = hsec_midnight / 100.0
+        for k in range(chunk_cnt):
+            rec_abs_times.append(base_sec + k * rec_int)
+
     records = []
     for i in range(n_records):
-        offset = i * record_size
-        b = data_section[offset:offset + record_size]
-        if len(b) < record_size:
+        b = data_section[i * RECORD_SZ: (i + 1) * RECORD_SZ]
+        if len(b) < RECORD_SZ:
             break
-        
-        # Rohwerte auslesen
-        raw_power   = struct.unpack_from('<H', b, 1)[0]  # bytes 1-2
-        raw_cadence = struct.unpack_from('<H', b, 3)[0]  # bytes 3-4
-        
-        # Leistung berechnen
+
+        raw_power   = struct.unpack_from('<H', b, 1)[0]
+        raw_cadence = b[3]
+
         if raw_power > 0:
             power_w = (raw_power - zero_offset) * slope
             power_w = max(0.0, power_w)
         else:
             power_w = 0.0
-        
-        elapsed = (i + 1) * rec_int
-        
+
+        t_abs = rec_abs_times[i] if i < len(rec_abs_times) else (i * rec_int)
+
         records.append({
-            'elapsed_s':   elapsed,
+            'elapsed_s':   round(i * rec_int, 2),
+            'step_s':      round(i * rec_int, 2),
+            't_abs':       t_abs,
             'power_w':     round(power_w),
             'raw_power':   raw_power,
+            'cadence':     raw_cadence,
             'raw_cadence': raw_cadence,
-            'heart_rate':  0,
-            'cadence':     0,
         })
-    
-    # Führende Null-Leistungswerte abschneiden (Vorlauf)
+
     if trim_zeros and records:
         first_power_idx = next(
             (i for i, r in enumerate(records) if r['power_w'] > 0), None
         )
-        if first_power_idx is not None and first_power_idx > 0:
-            records = records[first_power_idx:]
-        
-        # Zeit neu ab rec_int starten
-        if records:
-            for j, r in enumerate(records):
-                r['elapsed_s'] = round((j + 1) * rec_int, 3)
-    
+        last_power_idx = next(
+            (i for i in range(len(records) - 1, -1, -1) if records[i]['power_w'] > 0), None
+        )
+        if first_power_idx is not None and last_power_idx is not None and last_power_idx >= first_power_idx:
+            records = records[first_power_idx: last_power_idx + 1]
+
+    if records:
+        t0_abs = records[0]['t_abs']
+        for j, r in enumerate(records):
+            r['elapsed_s'] = round(r['t_abs'] - t0_abs, 2)
+            r['step_s']    = round(j * rec_int, 2)
+
     return records, hdr
 
 
@@ -202,16 +280,19 @@ def parse_fit_file(filepath, trim_zeros=True):
             "speed_kmh":  speed_kmh,
         })
 
-    # Führende Null-Leistungswerte abschneiden
+    # Führende und nachfolgende Null-Leistungswerte abschneiden
     if trim_zeros and records:
         first_power_idx = next(
             (i for i, r in enumerate(records) if r['power_w'] > 0), None
         )
-        if first_power_idx is not None and first_power_idx > 0:
-            records = records[first_power_idx:]
-            # Zeit neu ab 1s starten
+        last_power_idx = next(
+            (i for i in range(len(records) - 1, -1, -1) if records[i]['power_w'] > 0), None
+        )
+        if first_power_idx is not None and last_power_idx is not None and last_power_idx >= first_power_idx:
+            records = records[first_power_idx: last_power_idx + 1]
+            t0_fit = records[0]['elapsed_s']
             for j, r in enumerate(records):
-                r['elapsed_s'] = float(j + 1)
+                r['elapsed_s'] = round(r['elapsed_s'] - t0_fit, 2)
 
     athlete_name, test_date = _get_fit_info(filepath)
     return records, athlete_name, test_date
@@ -239,21 +320,19 @@ def _get_fit_info(filepath):
 # ---------------------------------------------------------------------------
 
 def seconds_to_timestr(s):
-    """Konvertiert Sekunden in '0:00:00.10' Format."""
-    m = int(s) // 60
-    whole_sec = int(s) % 60
-    hundredths = round((s % 1) * 100)
-    if hundredths >= 100:
-        hundredths = 99
-    return f"0:{m:02d}:{whole_sec:02d}.{hundredths:02d}"
+    """Konvertiert Sekunden in '0:00:00.00' Format (identisch zum SRM-Export)."""
+    s_rounded = round(float(s), 2)
+    m = int(s_rounded // 60)
+    rem_sec = s_rounded - m * 60
+    return f"0:{m:02d}:{rem_sec:05.2f}"
 
 
 def create_sprint_excel(records, output_path, athlete_name="", test_date="",
                         source_filename="", rec_int_label="0.1s (SRM)"):
     """
-    Erstellt Excel-Datei im Sprint-Kohmann-Format.
+    Erstellt Excel-Datei im SRM-Sprint-Format (identisch zu sprint knobbe.xlsx).
     
-    Spalten: A=Power[W], B=HR[bpm], C=Cadence[rpm], D=Speed[km/h], E=Zeit, F=Index
+    Spalten: A=Power[W], B=HR[bpm], C=Cadence[rpm], D=Speed[km/h], E=Zeit, F=Index (1..N)
     Zeilen 1-3: Header-Info
     Ab Zeile 4: Daten
     """
@@ -273,7 +352,7 @@ def create_sprint_excel(records, output_path, athlete_name="", test_date="",
     else:
         ws.title = "Data_Sprint"
 
-    # Header-Zeilen (Rows 1-3) -- wie in Sprint Kohman.xlsx
+    # Header-Zeilen (Rows 1-3)
     ws.cell(row=1, column=2).value = len(records)
     ws.cell(row=1, column=4).value = rec_int_label
     ws.cell(row=1, column=5).value = athlete_name
@@ -292,16 +371,12 @@ def create_sprint_excel(records, output_path, athlete_name="", test_date="",
         elapsed  = rec["elapsed_s"]
         time_str = seconds_to_timestr(elapsed)
         power    = rec.get("power_w", rec.get("power", 0))
-        hr       = rec.get("heart_rate", 0)
         cadence  = rec.get("cadence", 0)
-        speed    = rec.get("speed_kmh", 0.0)
 
         ws.cell(row=row, column=1).value = int(round(power))   # A: Leistung
-        ws.cell(row=row, column=2).value = int(hr)             # B: HF
         ws.cell(row=row, column=3).value = int(cadence)        # C: Kadenz
-        ws.cell(row=row, column=4).value = round(speed, 2)     # D: Speed
         ws.cell(row=row, column=5).value = time_str            # E: Zeit
-        ws.cell(row=row, column=6).value = i + 2               # F: Index
+        ws.cell(row=row, column=6).value = i + 1               # F: Index (1..N)
 
     # Spaltenbreiten
     ws.column_dimensions["A"].width = 10
@@ -350,16 +425,12 @@ def create_sprint_excel_bytes(records, athlete_name="", test_date="",
         elapsed  = rec["elapsed_s"]
         time_str = seconds_to_timestr(elapsed)
         power    = rec.get("power_w", rec.get("power", 0))
-        hr       = rec.get("heart_rate", 0)
         cadence  = rec.get("cadence", 0)
-        speed    = rec.get("speed_kmh", 0.0)
 
         ws.cell(row=row, column=1).value = int(round(power))
-        ws.cell(row=row, column=2).value = int(hr)
         ws.cell(row=row, column=3).value = int(cadence)
-        ws.cell(row=row, column=4).value = round(speed, 2)
         ws.cell(row=row, column=5).value = time_str
-        ws.cell(row=row, column=6).value = i + 2
+        ws.cell(row=row, column=6).value = i + 1
 
     ws.column_dimensions["A"].width = 10
     ws.column_dimensions["B"].width = 8

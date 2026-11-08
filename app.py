@@ -53,8 +53,46 @@ def parse_sprint_excel(file_contents):
                     sprint_cadences.append(c)
             except ValueError:
                 continue
+
+    # Führende und nachfolgende Null-Leistungswerte entfernen und Zeit ab 0.00s starten
+    if sprint_powers:
+        first_idx = next((i for i, p in enumerate(sprint_powers) if p > 0), None)
+        last_idx = next((i for i in range(len(sprint_powers) - 1, -1, -1) if sprint_powers[i] > 0), None)
+        if first_idx is not None and last_idx is not None and last_idx >= first_idx:
+            sprint_powers = sprint_powers[first_idx: last_idx + 1]
+            sprint_times = sprint_times[first_idx: last_idx + 1]
+            sprint_cadences = sprint_cadences[first_idx: last_idx + 1]
+            t0 = sprint_times[0]
+            sprint_times = [round(t - t0, 2) for t in sprint_times]
                 
     return sprint_powers, sprint_times, sprint_cadences
+
+
+SPRINT_PLATEAU_MIN_POINTS = 8
+
+
+def detect_sprint_end(sprint_powers, sprint_times, min_points=SPRINT_PLATEAU_MIN_POINTS):
+    """
+    Ermittelt die gewertete Sprint-Gesamtdauer (t_bel).
+
+    Bleibt am Ende des Sprints dieselbe Leistung über MEHR als `min_points`
+    Datenpunkte konstant (Ergometer liefert keine neuen Werte mehr), wird dieses
+    Plateau nicht mehr zur Sprintdauer gezählt. t_bel endet dann beim ersten
+    Datenpunkt des Plateaus. Die Rohdaten selbst bleiben unverändert.
+
+    Returns: (t_bel, plateau_start_idx)  -- plateau_start_idx ist None, wenn kein Plateau erkannt wurde.
+    """
+    if not sprint_powers or not sprint_times:
+        return 0.0, None
+    n = len(sprint_powers)
+    last_p = sprint_powers[-1]
+    start_idx = n - 1
+    while start_idx > 0 and sprint_powers[start_idx - 1] == last_p:
+        start_idx -= 1
+    run_len = n - start_idx
+    if run_len > min_points and start_idx > 0:
+        return float(sprint_times[start_idx]), start_idx
+    return float(max(sprint_times)), None
 
 
 # TEMPORARY SRM DUMP
@@ -90,6 +128,21 @@ st.markdown("""
         background-color: #00a1e0 !important;
         color: white !important;
         border: none !important;
+    }
+    /* Schieberegler (st.slider) in HYCYS Türkis (#2cb7b9) statt Standard-Rot */
+    div[data-baseweb="slider"] div[role="slider"] {
+        background-color: #2cb7b9 !important;
+        border-color: #2cb7b9 !important;
+        box-shadow: 0 0 0 0.2rem rgba(44, 183, 185, 0.25) !important;
+    }
+    div[data-baseweb="slider"] div[data-testid="stThumbValue"],
+    div[data-baseweb="slider"] div[role="slider"] > div {
+        color: #2cb7b9 !important;
+        font-weight: 700 !important;
+    }
+    div[data-baseweb="slider"] > div > div > div:first-child {
+        background: #2cb7b9 !important;
+        background-color: #2cb7b9 !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -157,6 +210,1404 @@ def update_lauftest_lac():
             for col_name, new_val in edit.items():
                 st.session_state.df_lauftest_input.loc[int(row_idx), col_name] = new_val
 
+def format_pace_mmss(v_ms):
+    try:
+        v = float(v_ms)
+    except (ValueError, TypeError):
+        return "-"
+    if pd.isna(v) or v <= 0:
+        return "-"
+    sec = 1000.0 / v
+    m = int(sec // 60)
+    s = int(round(sec % 60))
+    if s == 60:
+        m += 1
+        s = 0
+    return f"{m:02d}:{s:02d}"
+
+
+DEFAULT_GDRIVE_ROOT_LINK = "https://drive.google.com/drive/folders/1Deg3OVDz19GLBervdQprPCZ-8MIkVGD5"
+
+
+def format_hycys_pdf_filename(diagnostik_type: str, athlete_name: str, test_date: str) -> str:
+    """
+    Erzeugt den standardisierten HYCYS-Dateinamen für das PDF:
+    'ArtderDiagnostik_Vorname Nachname_Datum.pdf'
+    z.B. 'CyclingBLUE_Markus Hertlein_13.03.2025.pdf' oder 'RunningBLUE_Christoph Muxel_01.10.2026.pdf'
+    """
+    diag_clean = str(diagnostik_type or "Diagnostik").replace(" ", "").strip()
+    name_clean = " ".join(str(athlete_name or "Athlet").strip().split())
+    date_clean = str(test_date or "").strip()
+    return f"{diag_clean}_{name_clean}_{date_clean}.pdf"
+
+
+def format_hycys_excel_filename(diagnostik_type: str, athlete_name: str, test_date: str) -> str:
+    """
+    Erzeugt den standardisierten HYCYS-Dateinamen für die Excel-Rohdaten-Auswertung:
+    'ArtderDiagnostik_Vorname Nachname_Datum.xlsx'
+    z.B. 'CyclingBLUE_Markus Hertlein_13.03.2025.xlsx'
+    """
+    diag_clean = str(diagnostik_type or "Diagnostik").replace(" ", "").strip()
+    name_clean = " ".join(str(athlete_name or "Athlet").strip().split())
+    date_clean = str(test_date or "").strip()
+    return f"{diag_clean}_{name_clean}_{date_clean}.xlsx"
+
+
+def format_athlete_folder_name(athlete_name: str) -> str:
+    """
+    Erzeugt den Athleten-Ordnernamen im Format 'Nachname_Vorname'
+    aus dem Athletennamen (z.B. 'Markus Hertlein' -> 'Hertlein_Markus').
+    """
+    parts = [p.strip() for p in str(athlete_name or "").strip().split() if p.strip()]
+    if len(parts) >= 2:
+        vorname = "_".join(parts[:-1])
+        nachname = parts[-1]
+        return f"{nachname}_{vorname}"
+    elif len(parts) == 1:
+        return parts[0]
+    return "Unbekannt"
+
+
+def _parse_date_str_to_dt(date_str: str):
+    """Konvertiert Datums-Strings wie '13.03.2025' oder '2025-03-13' in ein datetime-Objekt für Excel."""
+    import datetime as _dt
+    s = str(date_str or "").strip()
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%y", "%d/%m/%Y"):
+        try:
+            return _dt.datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    return s
+
+
+def _split_vorname_nachname(athlete_name: str):
+    """Teilt 'Vorname Nachname' in (vorname, nachname) auf."""
+    parts = [p.strip() for p in str(athlete_name or "").strip().split() if p.strip()]
+    if len(parts) >= 2:
+        return " ".join(parts[:-1]), parts[-1]
+    elif len(parts) == 1:
+        return "", parts[0]
+    return "", "Unbekannt"
+
+
+def _seconds_to_excel_time(sec_val):
+    """Konvertiert Sekunden in ein datetime.time Objekt für die HYCYS-Excel-Vorlagen."""
+    import datetime as _dt
+    try:
+        total_sec = int(round(float(sec_val)))
+        if total_sec < 0:
+            total_sec = 0
+        h = (total_sec // 3600) % 24
+        m = (total_sec % 3600) // 60
+        s = total_sec % 60
+        return _dt.time(h, m, s)
+    except Exception:
+        return sec_val
+
+
+def create_hycys_excel_lauf(
+    athlete_name: str,
+    birthdate: str,
+    test_date: str,
+    gender_str: str,
+    diagnostik_type: str,
+    coach: str,
+    sportart: str,
+    kategorie: str,
+    height: float,
+    weight: float,
+    body_fat_pct: float,
+    df_sf: pd.DataFrame,
+    ruhe_lac: float,
+    ruhe_hr: float,
+    speed: list,
+    lactate: list,
+    hr: list,
+    abs_vo2max: float,
+    vo2_steady_abs: list,
+    vco2_steady_abs: list,
+    uploaded_file=None,
+    uploaded_ramp=None,
+) -> bytes:
+    """
+    Befüllt die originale 'HYCYS - Auswertung Lauf.xlsx' Vorlage mit allen in der App
+    eingegebenen und hochgeladenen Rohdaten und gibt die fertige .xlsx-Datei als Bytes zurück.
+    """
+    import openpyxl
+    import io
+
+    template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "HYCYS - Auswertung Lauf.xlsx")
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb["Eingabedaten"]
+
+    vorname, nachname = _split_vorname_nachname(athlete_name)
+    gender_norm = str(gender_str or "männlich").strip().lower()
+    gender_code = "w" if ("weib" in gender_norm or "frau" in gender_norm or gender_norm == "w") else "m"
+
+    ws["B5"] = str(coach or "Markus Hertlein")
+    ws["B6"] = _parse_date_str_to_dt(test_date)
+    ws["B9"] = nachname
+    ws["B10"] = vorname
+    ws["B11"] = float(height) if height else 180
+    ws["B12"] = float(weight) if weight else 75.0
+    ws["B15"] = _parse_date_str_to_dt(birthdate)
+    ws["B17"] = gender_code
+    ws["B19"] = str(sportart or "Laufen")
+    ws["B20"] = str(kategorie or "Amateur")
+    diag_str = str(diagnostik_type or "Running BLUE").strip()
+    ws["B21"] = diag_str if diag_str.upper().startswith("HYCYS") else f"HYCYS {diag_str}"
+
+    # Parizkova 10-Falten (B28:D37) & Körperfett (G31)
+    sf_sum = 0.0
+    if df_sf is not None and not df_sf.empty:
+        for idx in range(min(10, len(df_sf))):
+            r_excel = 28 + idx
+            m1 = float(pd.to_numeric(df_sf.iloc[idx].get("M1", 0.0), errors="coerce") or 0.0)
+            m2 = float(pd.to_numeric(df_sf.iloc[idx].get("M2", 0.0), errors="coerce") or 0.0)
+            m3 = float(pd.to_numeric(df_sf.iloc[idx].get("M3", 0.0), errors="coerce") or 0.0)
+            ws.cell(r_excel, 2, m1)
+            ws.cell(r_excel, 3, m2)
+            ws.cell(r_excel, 4, m3)
+            sf_sum += (m1 + m2 + m3) / 3.0
+    if sf_sum > 0:
+        ws["G31"] = "=(22.32*LOG10(G28)-29.2)"
+    else:
+        ws["G31"] = float(body_fat_pct)
+
+    # HFmax (M31)
+    valid_hrs = [float(h) for h in hr if pd.notna(h) and float(h) > 0]
+    if valid_hrs:
+        ws["M31"] = int(round(max(valid_hrs)))
+
+    # Stufentest Laktat & HF (A42:C50)
+    ws["B42"] = float(ruhe_lac) if pd.notna(ruhe_lac) else 0.8
+    ws["C42"] = int(round(float(ruhe_hr))) if pd.notna(ruhe_hr) and float(ruhe_hr) > 0 else 70
+
+    for idx in range(8):
+        r_stage = 43 + idx
+        if idx < len(speed):
+            ws.cell(r_stage, 1, float(speed[idx]))
+            ws.cell(r_stage, 2, float(lactate[idx]) if idx < len(lactate) and pd.notna(lactate[idx]) else None)
+            ws.cell(r_stage, 3, int(round(float(hr[idx]))) if idx < len(hr) and pd.notna(hr[idx]) else None)
+        else:
+            ws.cell(r_stage, 1, None)
+            ws.cell(r_stage, 2, None)
+            ws.cell(r_stage, 3, None)
+
+    # Spiro-Rohdaten Stufentest (B57:G...) & Rampentest (K57:P...)
+    for r_clear in range(57, 300):
+        for c_clear in (2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16):
+            ws.cell(r_clear, c_clear, None)
+
+    def _write_spiro_block(file_obj, start_col: int):
+        if file_obj is None:
+            return 0
+        try:
+            file_obj.seek(0)
+            df_raw = (
+                pd.read_csv(file_obj, header=None, low_memory=False)
+                if str(file_obj.name).lower().endswith(".csv")
+                else pd.read_excel(file_obj, header=None)
+            )
+            file_obj.seek(0)
+            written = 0
+            for r_idx in range(3, len(df_raw)):
+                if df_raw.shape[1] <= 14:
+                    break
+                t_raw = df_raw.iloc[r_idx, 9]
+                if pd.isna(t_raw):
+                    continue
+                t_sec = parse_time_to_seconds(t_raw)
+                if pd.isna(t_sec):
+                    continue
+                target_row = 57 + written
+                ws.cell(target_row, start_col, _seconds_to_excel_time(t_sec))
+                for offset in range(1, 6):
+                    val = pd.to_numeric(df_raw.iloc[r_idx, 9 + offset], errors="coerce")
+                    ws.cell(target_row, start_col + offset, float(val) if pd.notna(val) else None)
+                written += 1
+            return written
+        except Exception:
+            return 0
+
+    _write_spiro_block(uploaded_file, 2)   # Spalten B..G (Stufentest)
+    n_ramp = _write_spiro_block(uploaded_ramp, 11)  # Spalten K..P (Rampentest)
+
+    # VO2max [ml/min] in V56 hinterlegen, falls kein separater Rampentest-Block geschrieben wurde oder Override aktiv ist
+    if abs_vo2max and float(abs_vo2max) > 0:
+        if n_ramp == 0:
+            ws["V56"] = float(abs_vo2max)
+
+    # Steady-State VO2 & VCO2 je Stufe in 'Calculation Spirometrie' (M8:N15) übertragen,
+    # damit 'Calculation Physiologie' exakt mit den App-Stufenfenstern übereinstimmt
+    if "Calculation Spirometrie" in wb.sheetnames and vo2_steady_abs:
+        ws_cs = wb["Calculation Spirometrie"]
+        for idx in range(8):
+            r_cs = 8 + idx
+            if idx < len(vo2_steady_abs) and vo2_steady_abs[idx] > 0:
+                ws_cs.cell(r_cs, 13, float(vo2_steady_abs[idx]))  # Spalte M: VO2
+                vco2_v = float(vco2_steady_abs[idx]) if idx < len(vco2_steady_abs) and vco2_steady_abs[idx] > 0 else 0.0
+                if vco2_v > 0:
+                    ws_cs.cell(r_cs, 14, vco2_v)  # Spalte N: VCO2
+            else:
+                ws_cs.cell(r_cs, 13, None)
+                ws_cs.cell(r_cs, 14, None)
+
+    out_buf = io.BytesIO()
+    wb.save(out_buf)
+    return out_buf.getvalue()
+
+
+def create_hycys_excel_rad(
+    athlete_name: str,
+    birthdate: str,
+    test_date: str,
+    diagnostik_type: str,
+    coach: str,
+    kategorie: str,
+    height: float,
+    weight: float,
+    body_fat_pct: float,
+    df_sf: pd.DataFrame,
+    df_sprint_lac: pd.DataFrame,
+    ppo_val: float,
+    abs_vo2max: float,
+    t_alak: float,
+    t_bel: float,
+    slope_val: float,
+    intercept_val: float,
+    hfmax_val: float,
+    sprint_times: list = None,
+    sprint_powers: list = None,
+    sprint_cadences: list = None,
+    uploaded_spiro=None,
+) -> bytes:
+    """
+    Befüllt die originale 'HYCYS - Auswertung Rad.xlsx' Vorlage mit allen in der App
+    eingegebenen und hochgeladenen Rohdaten und gibt die fertige .xlsx-Datei als Bytes zurück.
+    """
+    import openpyxl
+    import io
+
+    template_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "Radsport Auswertungen", "HYCYS - Auswertung Rad.xlsx"
+    )
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb["Eingabedaten"]
+
+    vorname, nachname = _split_vorname_nachname(athlete_name)
+
+    ws["B5"] = str(coach or "Markus Hertlein")
+    ws["B6"] = _parse_date_str_to_dt(test_date)
+    ws["B9"] = nachname
+    ws["B10"] = vorname
+    ws["B11"] = float(height) if height else 178
+    ws["B12"] = float(weight) if weight else 72.0
+    ws["B15"] = _parse_date_str_to_dt(birthdate)
+    ws["B18"] = "Radsport"
+    ws["B19"] = str(kategorie or "Amateur")
+    diag_str = str(diagnostik_type or "Cycling BLUE").strip()
+    ws["B20"] = diag_str if diag_str.upper().startswith("HYCYS") else f"HYCYS {diag_str}"
+
+    # Sprinttest Laktatwerte (B26:B38 -> Ruhe 1..3 + 0..10 min)
+    if df_sprint_lac is not None and "Laktat [mmol/L]" in df_sprint_lac.columns:
+        lac_list = list(df_sprint_lac["Laktat [mmol/L]"].values)
+        for idx in range(min(13, len(lac_list))):
+            val = pd.to_numeric(lac_list[idx], errors="coerce")
+            ws.cell(26 + idx, 2, float(val) if pd.notna(val) else None)
+
+    # VO2max & 30s PPO
+    ws["F25"] = float(ppo_val) if ppo_val else 0.0
+    ws["F31"] = float(abs_vo2max) if abs_vo2max else 0.0
+
+    # Optional: Spiro-Rohdaten in E35:F76 eintragen, falls hochgeladen
+    if uploaded_spiro is not None:
+        try:
+            uploaded_spiro.seek(0)
+            df_sp = (
+                pd.read_csv(uploaded_spiro, header=None, low_memory=False)
+                if str(uploaded_spiro.name).lower().endswith(".csv")
+                else pd.read_excel(uploaded_spiro, header=None)
+            )
+            uploaded_spiro.seek(0)
+            if df_sp.shape[1] > 13:
+                sp_rows = []
+                for r_idx in range(3, len(df_sp)):
+                    t_raw = df_sp.iloc[r_idx, 9]
+                    v_raw = pd.to_numeric(df_sp.iloc[r_idx, 13], errors="coerce")
+                    t_sec = parse_time_to_seconds(t_raw)
+                    if pd.notna(t_sec) and pd.notna(v_raw):
+                        sp_rows.append((t_sec, float(v_raw)))
+                # Letzte 42 Messpunkte (entspricht E35:F76 = 42 Zeilen) eintragen
+                sp_tail = sp_rows[-42:] if len(sp_rows) > 42 else sp_rows
+                for idx_r in range(42):
+                    r_target = 35 + idx_r
+                    if idx_r < len(sp_tail):
+                        ws.cell(r_target, 5, _seconds_to_excel_time(sp_tail[idx_r][0]))
+                        ws.cell(r_target, 6, sp_tail[idx_r][1])
+                    else:
+                        ws.cell(r_target, 5, None)
+                        ws.cell(r_target, 6, None)
+        except Exception:
+            pass
+
+    # VLamax Zeiten (t_alak & t_bel Overrides in C42:C43)
+    ws["C42"] = float(t_alak) if t_alak else 0.0
+    ws["C43"] = float(t_bel) if t_bel else 0.0
+
+    # Herzfrequenz lineare Regression (B50:B52)
+    ws["B50"] = float(slope_val)
+    ws["B51"] = float(intercept_val)
+    ws["B52"] = float(hfmax_val)
+
+    # Parizkova 10-Falten (J26:L35) & Fett % (O29)
+    sf_sum = 0.0
+    if df_sf is not None and not df_sf.empty:
+        for idx in range(min(10, len(df_sf))):
+            r_excel = 26 + idx
+            m1 = float(pd.to_numeric(df_sf.iloc[idx].get("M1", 0.0), errors="coerce") or 0.0)
+            m2 = float(pd.to_numeric(df_sf.iloc[idx].get("M2", 0.0), errors="coerce") or 0.0)
+            m3 = float(pd.to_numeric(df_sf.iloc[idx].get("M3", 0.0), errors="coerce") or 0.0)
+            ws.cell(r_excel, 10, m1)
+            ws.cell(r_excel, 11, m2)
+            ws.cell(r_excel, 12, m3)
+            sf_sum += (m1 + m2 + m3) / 3.0
+    if sf_sum > 0:
+        ws["O29"] = "=(22.32*LOG10(O26)-29.2)"
+    else:
+        ws["O29"] = float(body_fat_pct)
+
+    # Sprint-Rohdaten in 'Data Sprint' (ab Zeile 10: Spalte A = Power, Spalte C = Cadence, Spalte E = Time, Spalte F = Index)
+    if "Data Sprint" in wb.sheetnames and sprint_powers and len(sprint_powers) > 0:
+        ws_sp = wb["Data Sprint"]
+        max_clear = max(250, 10 + len(sprint_powers) + 5)
+        for r_cl in range(10, max_clear):
+            for c_cl in range(1, 7):
+                ws_sp.cell(r_cl, c_cl, None)
+        for idx, p_val in enumerate(sprint_powers):
+            r_sp = 10 + idx
+            cad_val = float(sprint_cadences[idx]) if (sprint_cadences and idx < len(sprint_cadences)) else 0.0
+            t_val = float(sprint_times[idx]) if (sprint_times and idx < len(sprint_times)) else round(idx * 0.1, 2)
+            t_rounded = round(t_val, 2)
+            t_min = int(t_rounded // 60)
+            t_rem = t_rounded - t_min * 60
+            t_str = f"0:{t_min:02d}:{t_rem:05.2f}"
+            ws_sp.cell(r_sp, 1, int(round(float(p_val))))
+            ws_sp.cell(r_sp, 3, int(round(cad_val)))
+            ws_sp.cell(r_sp, 5, t_str)
+            ws_sp.cell(r_sp, 6, idx + 1)
+
+    out_buf = io.BytesIO()
+    wb.save(out_buf)
+    return out_buf.getvalue()
+
+
+def extract_gdrive_folder_id(link_or_id: str) -> str:
+    """Extrahiert die Google Drive Folder-ID aus einem Drive-Link oder gibt die ID direkt zurück."""
+    import re
+    s = str(link_or_id or "").strip()
+    m = re.search(r"/folders/([a-zA-Z0-9_-]+)", s)
+    if m:
+        return m.group(1)
+    m_id = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", s)
+    if m_id:
+        return m_id.group(1)
+    return s
+
+
+def upload_files_to_gdrive(
+    pdf_bytes: bytes,
+    pdf_filename: str,
+    excel_bytes: bytes,
+    excel_filename: str,
+    athlete_folder_name: str,
+    gender_str: str,
+    root_folder_link_or_id: str,
+):
+    """
+    Speichert SOWOHL das PDF als auch die HYCYS-Excel-Rohdatendatei in Google Drive unter:
+      <Root-Ordner> / <Männer bzw. Frauen> / <Nachname_Vorname> / <Dateiname>
+    Sucht bestehende Ordner case-insensitiv (z.B. 'Nachname_Vorname') und legt sie nur an,
+    falls sie noch nicht existieren.
+    Unterstützt:
+      1. Lokalen Google-Drive-Desktop-Pfad (falls auf dem PC synchronisiert)
+      2. Google Drive API per OAuth2 Desktop-Login (gdrive_oauth_client.json / gdrive_token.json)
+      3. Google Drive API per Service Account (gdrive_service_account.json / st.secrets)
+    """
+    gender_norm = str(gender_str or "männlich").strip().lower()
+    is_female = ("weib" in gender_norm) or ("frau" in gender_norm) or (gender_norm == "w")
+    gender_folder_candidates = ["Frauen", "Damen", "Weiblich"] if is_female else ["Männer", "Maenner", "Herren", "Männlich"]
+    default_gender_folder = "Frauen" if is_female else "Männer"
+
+    raw_target = str(root_folder_link_or_id or DEFAULT_GDRIVE_ROOT_LINK).strip()
+    if not raw_target:
+        return False, "Bitte einen Google Drive Ordner-Link (oder lokalen Google-Drive-Pfad) hinterlegen."
+
+    files_to_save = [(pdf_filename, pdf_bytes, "application/pdf")]
+    if excel_bytes is not None and excel_filename:
+        files_to_save.append(
+            (excel_filename, excel_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        )
+
+    # Fall A: Lokaler Google-Drive-Desktop-Pfad (falls auf dem Rechner gemountet)
+    if os.path.isdir(raw_target):
+        gender_dir = None
+        for entry in os.listdir(raw_target):
+            full_e = os.path.join(raw_target, entry)
+            if os.path.isdir(full_e) and entry.lower() in [c.lower() for c in gender_folder_candidates]:
+                gender_dir = full_e
+                break
+        if gender_dir is None:
+            gender_dir = os.path.join(raw_target, default_gender_folder)
+            os.makedirs(gender_dir, exist_ok=True)
+
+        athlete_dir = None
+        for entry in os.listdir(gender_dir):
+            full_a = os.path.join(gender_dir, entry)
+            if os.path.isdir(full_a) and entry.strip().lower() == athlete_folder_name.lower():
+                athlete_dir = full_a
+                break
+        created_new = False
+        if athlete_dir is None:
+            athlete_dir = os.path.join(gender_dir, athlete_folder_name)
+            os.makedirs(athlete_dir, exist_ok=True)
+            created_new = True
+
+        saved_names = []
+        for fname, fbytes, _ in files_to_save:
+            target_file = os.path.join(athlete_dir, fname)
+            with open(target_file, "wb") as f_out:
+                f_out.write(fbytes)
+            saved_names.append(fname)
+        status_note = "Neuer Athleten-Ordner erstellt" if created_new else "Bestehender Athleten-Ordner genutzt"
+        return True, f"Gespeichert in `{athlete_dir}`: **{', '.join(saved_names)}** ({status_note})."
+
+    # Fall B: Google Drive API via google-api-python-client
+    root_id = extract_gdrive_folder_id(raw_target)
+    try:
+        from google.oauth2 import service_account
+        from google.oauth2.credentials import Credentials as UserCredentials
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        import io
+    except ImportError:
+        return (
+            False,
+            "Für den direkten Cloud-Upload per Google-Drive-Link werden die Pakete "
+            "`google-api-python-client`, `google-auth` und `google-auth-oauthlib` benötigt.",
+        )
+
+    creds = None
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    sa_file = os.path.join(app_dir, "gdrive_service_account.json")
+    oauth_client_file = os.path.join(app_dir, "gdrive_oauth_client.json")
+    token_file = os.path.join(app_dir, "gdrive_token.json")
+
+    # 1. Gespeichertes OAuth2 User-Token prüfen
+    if os.path.isfile(token_file):
+        try:
+            creds = UserCredentials.from_authorized_user_file(token_file, scopes)
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(GoogleAuthRequest())
+                with open(token_file, "w", encoding="utf-8") as f_tok:
+                    f_tok.write(creds.to_json())
+        except Exception:
+            creds = None
+
+    # 2. st.secrets prüfen
+    if creds is None or not getattr(creds, "valid", True):
+        try:
+            if "gcp_service_account" in st.secrets:
+                creds = service_account.Credentials.from_service_account_info(
+                    dict(st.secrets["gcp_service_account"]), scopes=scopes
+                )
+        except Exception:
+            pass
+
+    # 3. Lokale JSON-Datei (Service Account oder OAuth Client) prüfen
+    if creds is None and os.path.isfile(sa_file):
+        try:
+            import json as _json
+            with open(sa_file, "r", encoding="utf-8") as _f:
+                _jdata = _json.load(_f)
+            if _jdata.get("type") == "service_account":
+                creds = service_account.Credentials.from_service_account_file(sa_file, scopes=scopes)
+            elif "installed" in _jdata or "web" in _jdata:
+                flow = InstalledAppFlow.from_client_secrets_file(sa_file, scopes)
+                creds = flow.run_local_server(port=0)
+                with open(token_file, "w", encoding="utf-8") as f_tok:
+                    f_tok.write(creds.to_json())
+        except Exception as e_auth:
+            return False, f"Fehler beim Laden von `gdrive_service_account.json`: {e_auth}"
+
+    if creds is None and os.path.isfile(oauth_client_file):
+        try:
+            flow = InstalledAppFlow.from_client_secrets_file(oauth_client_file, scopes)
+            creds = flow.run_local_server(port=0)
+            with open(token_file, "w", encoding="utf-8") as f_tok:
+                f_tok.write(creds.to_json())
+        except Exception as e_oauth:
+            return False, f"Fehler bei der Google OAuth-Anmeldung: {e_oauth}"
+
+    if creds is None:
+        return (
+            False,
+            "Noch keine Google-Drive-Anmeldedaten hinterlegt. Bitte lade unten im Feld "
+            "**'🔑 Einmalige Google-Drive-Verbindung einrichten'** deine Google JSON-Schlüsseldatei "
+            "(Service-Account oder OAuth-Desktop-Client) hoch – oder gib einen lokalen Google-Drive-Desktop-Ordnerpfad an.",
+        )
+
+    service = build("drive", "v3", credentials=creds)
+
+    def _find_or_create_subfolder(parent_id: str, candidates: list, create_name: str):
+        q = (
+            f"'{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' "
+            f"and trashed = false"
+        )
+        res = service.files().list(
+            q=q, fields="files(id, name)", includeItemsFromAllDrives=True, supportsAllDrives=True
+        ).execute()
+        files = res.get("files", [])
+        cand_lower = [c.strip().lower() for c in candidates]
+        for f_obj in files:
+            if f_obj["name"].strip().lower() in cand_lower:
+                return f_obj["id"], f_obj["name"], False
+        # Nicht gefunden -> neu anlegen
+        meta = {
+            "name": create_name,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_id],
+        }
+        created = service.files().create(body=meta, fields="id, name", supportsAllDrives=True).execute()
+        return created["id"], created["name"], True
+
+    try:
+        # 1. Geschlechter-Ordner (Männer / Frauen) suchen oder anlegen
+        gender_folder_id, gender_folder_actual, _ = _find_or_create_subfolder(
+            root_id, gender_folder_candidates, default_gender_folder
+        )
+        # 2. Athleten-Ordner (Nachname_Vorname) suchen oder anlegen
+        athlete_folder_id, athlete_folder_actual, created_athlete_folder = _find_or_create_subfolder(
+            gender_folder_id, [athlete_folder_name], athlete_folder_name
+        )
+
+        uploaded_links = []
+        for fname, fbytes, fmime in files_to_save:
+            q_file = (
+                f"'{athlete_folder_id}' in parents and name = '{fname}' and trashed = false"
+            )
+            existing_files = service.files().list(
+                q=q_file, fields="files(id, name, webViewLink)", includeItemsFromAllDrives=True, supportsAllDrives=True
+            ).execute().get("files", [])
+
+            media = MediaIoBaseUpload(io.BytesIO(fbytes), mimetype=fmime, resumable=False)
+            if existing_files:
+                file_id = existing_files[0]["id"]
+                uploaded = service.files().update(
+                    fileId=file_id, media_body=media, fields="id, name, webViewLink", supportsAllDrives=True
+                ).execute()
+            else:
+                file_meta = {"name": fname, "parents": [athlete_folder_id]}
+                uploaded = service.files().create(
+                    body=file_meta, media_body=media, fields="id, name, webViewLink", supportsAllDrives=True
+                ).execute()
+            wlink = uploaded.get("webViewLink", "")
+            uploaded_links.append(f"[{fname}]({wlink})" if wlink else f"`{fname}`")
+
+        folder_status = "neuer Ordner erstellt" if created_athlete_folder else "bestehender Ordner genutzt"
+        return (
+            True,
+            f"Erfolgreich in **{gender_folder_actual} / {athlete_folder_actual}** ({folder_status}) gespeichert: "
+            + " & ".join(uploaded_links),
+        )
+    except Exception as e_api:
+        err_str = str(e_api)
+        if "storageQuotaExceeded" in err_str or "Service Accounts do not have storage quota" in err_str:
+            return (
+                False,
+                "⚠️ **Ordner wurde erstellt, aber Datei-Upload durch Google blockiert (`storageQuotaExceeded`):**  \n"
+                "Google weist **Service-Accounts** in persönlichen *'Meine Ablage'*-Ordnern **0 Byte eigenen Speicherplatz** zu "
+                "(deshalb konnte der Ordner `Muxel_Christoph` mit 0 Byte angelegt werden, die `.pdf`- und `.xlsx`-Dateien aber nicht).  \n\n"
+                "**So löst du das in 1 Minute (2 Möglichkeiten):**  \n"
+                "1. **Über euer Google Workspace (`hycys.de` – ohne neuen Schlüssel):** Legt den Zielordner in Google Drive unter **'Geteilte Ablagen' (Shared Drives)** statt unter *'Meine Ablage'* an und gebt ihn für `markus-hertlein@diagnostik-test-514115.iam.gserviceaccount.com` als **Inhaltsmanager** frei. In *Geteilten Ablagen* zählt das Speicherkontingent der Organisation und der Service-Account funktioniert sofort!  \n"
+                "2. **Oder für 'Meine Ablage' (OAuth Desktop-Login):** Erstelle in der Google Cloud Console (*APIs & Dienste ➔ Anmeldedaten ➔ + Anmeldedaten erstellen*) eine **OAuth-Client-ID (Typ: Desktop-App)**, lade die JSON-Datei unten unter **'🔑 Google-Drive-Verbindung einrichten / ändern'** hoch und klicke noch einmal auf Speichern – dann öffnet sich einmalig dein Browser zur Bestätigung und die Dateien nutzen deinen eigenen Speicherplatz (`m.hertlein@hycys.de`).",
+            )
+        return False, f"Google Drive API Fehler: {e_api}"
+
+
+def render_gdrive_upload_section(
+    pdf_bytes: bytes,
+    diagnostik_type: str,
+    athlete_name: str,
+    test_date: str,
+    gender_str: str,
+    key_prefix: str,
+    excel_bytes: bytes = None,
+):
+    """Rendert die Download-Buttons (PDF + HYCYS Excel-Rohdaten) sowie die Google-Drive-Direktablage."""
+    pdf_filename = format_hycys_pdf_filename(diagnostik_type, athlete_name, test_date)
+    excel_filename = format_hycys_excel_filename(diagnostik_type, athlete_name, test_date)
+    athlete_folder = format_athlete_folder_name(athlete_name)
+    gender_norm = str(gender_str or "männlich").strip().lower()
+    gender_subfolder = "Frauen" if ("weib" in gender_norm or "frau" in gender_norm or gender_norm == "w") else "Männer"
+
+    if excel_bytes is not None:
+        col_dl_pdf, col_dl_xls, col_gd = st.columns([1.0, 1.0, 1.3])
+    else:
+        col_dl_pdf, col_gd = st.columns([1.0, 1.4])
+        col_dl_xls = None
+
+    with col_dl_pdf:
+        st.download_button(
+            label="PDF herunterladen",
+            data=pdf_bytes,
+            file_name=pdf_filename,
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True,
+            key=f"{key_prefix}_pdf_download_btn",
+        )
+
+    if col_dl_xls is not None and excel_bytes is not None:
+        with col_dl_xls:
+            st.download_button(
+                label="HYCYS Excel herunterladen",
+                data=excel_bytes,
+                file_name=excel_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"{key_prefix}_excel_download_btn",
+            )
+
+    with col_gd:
+        default_drive_link = st.session_state.get("hycys_gdrive_root_link", DEFAULT_GDRIVE_ROOT_LINK)
+        if not default_drive_link:
+            default_drive_link = DEFAULT_GDRIVE_ROOT_LINK
+        with st.popover("☁️ PDF & Excel direkt in Google Drive ablegen", use_container_width=True):
+            st.markdown(
+                f"**Ziel-Struktur in Google Drive:**  \n"
+                f"`📁 {gender_subfolder}` ➔ `📁 {athlete_folder}` ➔  \n"
+                f"• `📄 {pdf_filename}`  \n"
+                f"• `📊 {excel_filename}`"
+            )
+            drive_link_in = st.text_input(
+                "Google Drive Hauptordner-Link (oder lokaler Drive-Pfad):",
+                value=default_drive_link,
+                placeholder="https://drive.google.com/drive/folders/...",
+                key=f"{key_prefix}_gdrive_link_input",
+            )
+            st.session_state["hycys_gdrive_root_link"] = drive_link_in
+
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            sa_path = os.path.join(app_dir, "gdrive_service_account.json")
+            tok_path = os.path.join(app_dir, "gdrive_token.json")
+            has_creds = os.path.isfile(sa_path) or os.path.isfile(tok_path)
+            if not os.path.isdir(drive_link_in):
+                with st.expander("🔑 Google-Drive-Verbindung einrichten / ändern", expanded=not has_creds):
+                    st.caption(
+                        "Für Ordner in **'Meine Ablage'** bitte eine **OAuth-Client JSON (Desktop-App)** hochladen (nutzt deinen eigenen Google-Speicherplatz). "
+                        "Ein **Service-Account JSON** funktioniert bei Google Drive nur in **'Geteilten Ablagen' (Shared Drives)**."
+                    )
+                    cred_upload = st.file_uploader(
+                        "Google JSON-Schlüsseldatei (.json) – OAuth-Client (Desktop) oder Service-Account",
+                        type=["json"],
+                        key=f"{key_prefix}_gdrive_cred_upload",
+                    )
+                    if cred_upload is not None:
+                        with open(sa_path, "wb") as f_cred:
+                            f_cred.write(cred_upload.getvalue())
+                        if os.path.isfile(tok_path):
+                            try:
+                                os.remove(tok_path)
+                            except Exception:
+                                pass
+                        st.success("Schlüsseldatei aktualisiert! Klicke jetzt unten auf Speichern.")
+
+            if st.button(
+                f"☁️ PDF + Excel in '{gender_subfolder}/{athlete_folder}' speichern",
+                type="primary",
+                use_container_width=True,
+                key=f"{key_prefix}_gdrive_upload_btn",
+            ):
+                with st.spinner("Speichere PDF und HYCYS Excel-Auswertung in Google Drive..."):
+                    ok, msg = upload_files_to_gdrive(
+                        pdf_bytes=pdf_bytes,
+                        pdf_filename=pdf_filename,
+                        excel_bytes=excel_bytes,
+                        excel_filename=excel_filename,
+                        athlete_folder_name=athlete_folder,
+                        gender_str=gender_str,
+                        root_folder_link_or_id=drive_link_in,
+                    )
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+
+
+def render_centered_html_table(df: pd.DataFrame, highlight_first_row: bool = False):
+    """
+    Rendert einen Pandas DataFrame als übersichtliche Tabelle, in der alle Spaltenüberschriften
+    und alle Zellenwerte garantiert mittig zentriert dargestellt werden.
+    """
+    if df is None or df.empty:
+        return
+    headers_html = "".join(
+        f"<th style='text-align:center; padding:8px 10px; background-color:#2cb7b9; color:#ffffff; font-weight:700; font-size:13.5px; border:1px solid #e0e6e8;'>{col}</th>"
+        for col in df.columns
+    )
+    rows_html = []
+    for r_idx, (_, row) in enumerate(df.iterrows()):
+        is_hl = highlight_first_row and (r_idx == 0)
+        bg = "#eef8f8" if is_hl else ("#ffffff" if r_idx % 2 == 0 else "#f9fbfb")
+        fw = "700" if is_hl else "400"
+        cells_html = "".join(
+            f"<td style='text-align:center; padding:7px 10px; border:1px solid #e6ecec; color:#1a1a1a; font-weight:{fw}; font-size:13.5px;'>{val if pd.notna(val) else ''}</td>"
+            for val in row.values
+        )
+        rows_html.append(f"<tr style='background-color:{bg};'>{cells_html}</tr>")
+
+    table_html = f"""
+    <div style="overflow-x:auto; margin-bottom:10px;">
+        <table style="width:100%; border-collapse:collapse; border-radius:6px; overflow:hidden; border:1px solid #d9e2e2;">
+            <thead><tr>{headers_html}</tr></thead>
+            <tbody>{''.join(rows_html)}</tbody>
+        </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+def render_hycys_top_basisdaten(
+    weight: float,
+    body_fat_pct: float,
+    rel_vo2max: float,
+    abs_vo2max: float,
+    vlamax_str: str,
+    ans_label: str,
+    ans_main_str: str,
+    ans_sub_str: str,
+    ans_hr_str: str = "-",
+    ltp1_label: str = "LTP1",
+    ltp1_main_str: str = "-",
+    ltp1_sub_str: str = "",
+    ltp1_hr_str: str = "-",
+    hf_ans_str: str = None,
+    hf_ltp1_str: str = None,
+    mode: str = "",
+    athlete_name: str = "",
+    test_date: str = "",
+    is_presentation: bool = False,
+    extra_header_info: str = "",
+    spiro_note: str = "",
+):
+    """
+    Stellt den obersten Basisdaten-Abschnitt für Rad- und Laufauswertung einheitlich
+    und analog zum HYCYS-PDF dar:
+      1. Körperzusammensetzung: Gewicht, Körperfettanteil, Fettfreie Masse + HYCYS-Kreisdiagramm
+      2. VO2max und VLamax gleichwertig gegenübergestellt
+      3. Schwellenwerte der ANS bzw. LTP2 + HF
+      4. Darunter LTP1 (bzw. LT1/Fatmax) + HF
+    """
+    if hf_ans_str is None:
+        hf_ans_str = ans_hr_str
+    if hf_ltp1_str is None:
+        hf_ltp1_str = ltp1_hr_str
+
+    if athlete_name:
+        header_html = f"<b>Athlet:</b> {athlete_name} &nbsp;|&nbsp; <b>Test-Datum:</b> {test_date}"
+        if not is_presentation and extra_header_info:
+            header_html += f" &nbsp;|&nbsp; {extra_header_info}"
+
+        st.markdown(
+            f"""
+            <div style="font-size: 16px; line-height: 1.5; margin-bottom: 16px; padding: 12px 16px; border-left: 5px solid #2cb7b9; background-color: #f8fafa; border-radius: 4px;">
+                {header_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    vla_clean = str(vlamax_str).replace("mmol/l/s", "").replace("mmol/L/s", "").strip()
+    vla_unit_html = '<span style="font-size:13px; color:#1a1a1a; font-weight:600;">mmol/l/s</span>' if vla_clean and vla_clean != "-" else ""
+
+    fett_kg = weight * (body_fat_pct / 100.0)
+    ffm_kg = weight - fett_kg
+    ffm_pct = max(0.0, 100.0 - body_fat_pct)
+
+    # Kuchendiagramm gut lesbar erzeugen; Schriftgröße im Kuchenstück passt sich dynamisch an die Größe des Kuchenstücks an
+    import base64, io
+    fig_bf, ax_bf = plt.subplots(figsize=(3.3, 1.85), dpi=300)
+    pct_fett = max(0.1, body_fat_pct)
+    pct_frei = max(0.1, 100.0 - body_fat_pct)
+    wedges, texts, autotexts = ax_bf.pie(
+        [pct_fett, pct_frei],
+        explode=(0.10, 0),
+        colors=["#2cb7b9", "#cdb663"],
+        autopct=lambda p: f"{p:.1f} %".replace(".", ","),
+        startangle=90,
+        counterclock=False,
+        pctdistance=0.55,
+        textprops=dict(weight="bold", color="white"),
+        wedgeprops=dict(edgecolor="white", linewidth=1.6),
+    )
+    for i, (wedge, autotext) in enumerate(zip(wedges, autotexts)):
+        slice_pct = pct_fett if i == 0 else pct_frei
+        theta = np.deg2rad(wedge.theta1 + (wedge.theta2 - wedge.theta1) / 2.0)
+        e = 0.10 if i == 0 else 0.0
+        # Im schmaleren Stück weiter außen platzieren, wo der Keil breiter ist, und Schriftgröße dynamisch an den Winkel anpassen
+        if slice_pct < 25.0:
+            d = 0.66 if slice_pct < 18.0 else 0.60
+            dyn_fs = float(np.clip(2.8 + slice_pct * 0.21, 4.2, 7.8))
+        else:
+            d = 0.48
+            dyn_fs = float(np.clip(5.0 + slice_pct * 0.045, 7.2, 9.0))
+        autotext.set_position(((e + d) * np.cos(theta), (e + d) * np.sin(theta)))
+        autotext.set_fontsize(dyn_fs)
+        autotext.set_color("white")
+    ax_bf.axis("equal")
+    handles_bf = [Patch(color="#2cb7b9", label="Fett"), Patch(color="#cdb663", label="Fettfrei")]
+    legend_bf = ax_bf.legend(
+        handles=handles_bf,
+        loc="center left",
+        bbox_to_anchor=(0.94, 0.5),
+        fontsize=8.2,
+        frameon=False,
+        handlelength=1.2,
+        handletextpad=0.5,
+    )
+    for text in legend_bf.get_texts():
+        text.set_weight("bold")
+        text.set_color("#1a1a1a")
+    fig_bf.patch.set_facecolor("white")
+    plt.tight_layout(pad=0.05)
+    buf_bf = io.BytesIO()
+    fig_bf.savefig(buf_bf, format="png", dpi=300, bbox_inches="tight", pad_inches=0.03, facecolor="white")
+    plt.close(fig_bf)
+    b64_pie = base64.b64encode(buf_bf.getvalue()).decode("utf-8")
+
+    # 1. ZEILE: KÖRPERZUSAMMENSETZUNG + GUT LESBARES KUCHENDIAGRAMM
+    st.markdown(
+        f"""
+        <div style="display:grid; grid-template-columns: 1.55fr 1fr; gap:14px; align-items:stretch;">
+            <div style="border:1px solid #e0e8e8; border-left:5px solid #2cb7b9; border-radius:6px; padding:14px 18px; background-color:#ffffff; display:flex; flex-direction:column; justify-content:center;">
+                <div style="font-size:12.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:10px;">
+                    Körperzusammensetzung (Anthropometrie)
+                </div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; text-align:center;">
+                    <div style="background:#f8fafa; padding:10px 6px; border-radius:6px; border:1px solid #edf2f2;">
+                        <div style="font-size:12px; color:#1a1a1a; font-weight:600;">Gewicht</div>
+                        <div style="font-size:21px; font-weight:800; color:#1a1a1a; margin-top:2px;">{weight:.1f} kg</div>
+                    </div>
+                    <div style="background:#f8fafa; padding:10px 6px; border-radius:6px; border:1px solid #edf2f2;">
+                        <div style="font-size:12px; color:#1a1a1a; font-weight:600;">Körperfettanteil</div>
+                        <div style="font-size:21px; font-weight:800; color:#1a1a1a; margin-top:2px;">{body_fat_pct:.1f} %</div>
+                        <div style="font-size:11px; color:#1a1a1a;">({fett_kg:.1f} kg Fettmasse)</div>
+                    </div>
+                    <div style="background:#f8fafa; padding:10px 6px; border-radius:6px; border:1px solid #edf2f2;">
+                        <div style="font-size:12px; color:#1a1a1a; font-weight:600;">Fettfreie Masse (LBM)</div>
+                        <div style="font-size:21px; font-weight:800; color:#1a1a1a; margin-top:2px;">{ffm_kg:.1f} kg</div>
+                        <div style="font-size:11px; color:#1a1a1a;">({ffm_pct:.1f} % fettfrei)</div>
+                    </div>
+                </div>
+            </div>
+            <div style="border:1px solid #e0e8e8; border-radius:6px; padding:6px 12px; background-color:#ffffff; display:flex; align-items:center; justify-content:center;">
+                <img src="data:image/png;base64,{b64_pie}" style="height:142px; width:auto; object-fit:contain; display:block;" />
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 2. ZEILE: VO2MAX UND VLAMAX GLEICHWERTIG GEGENÜBERGESTELLT (BEIDE MIT BLAUER MARKIERUNG & SCHWARZER SCHRIFT)
+    col_vo2, col_vla = st.columns(2)
+    with col_vo2:
+        st.markdown(
+            f"""
+            <div style="border:1px solid #e0e8e8; border-left:5px solid #2cb7b9; border-radius:6px; padding:12px 18px; background-color:#ffffff; margin-top:8px; text-align:center;">
+                <div style="font-size:12.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase;">Aerobe Kapazität · VO2max</div>
+                <div style="display:flex; justify-content:center; align-items:baseline; gap:18px; margin-top:4px;">
+                    <div>
+                        <span style="font-size:24px; font-weight:800; color:#1a1a1a;">{rel_vo2max:.1f}</span>
+                        <span style="font-size:13px; color:#1a1a1a; font-weight:600;"> ml/min/kg (rel.)</span>
+                    </div>
+                    <div style="color:#1a1a1a; font-size:18px;">|</div>
+                    <div>
+                        <span style="font-size:24px; font-weight:800; color:#1a1a1a;">{int(round(abs_vo2max))}</span>
+                        <span style="font-size:13px; color:#1a1a1a; font-weight:600;"> ml/min (abs.)</span>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if spiro_note:
+            st.caption(f"{spiro_note}")
+    with col_vla:
+        st.markdown(
+            f"""
+            <div style="border:1px solid #e0e8e8; border-left:5px solid #2cb7b9; border-radius:6px; padding:12px 18px; background-color:#ffffff; margin-top:8px; text-align:center;">
+                <div style="font-size:12.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase;">Glykolytische Rate · VLamax</div>
+                <div style="display:flex; justify-content:center; align-items:baseline; gap:8px; margin-top:4px;">
+                    <span style="font-size:24px; font-weight:800; color:#1a1a1a;">{vla_clean}</span>
+                    {vla_unit_html}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # 3. ZEILE: SCHWELLENWERTE DER ANS / LTP2 (ALLES IN SCHWARZ, BLAUE MARKIERUNG LINKS)
+    sub_ans_html = f"<span style='font-size:14px; color:#1a1a1a; font-weight:600; margin-left:8px;'>({ans_sub_str})</span>" if ans_sub_str else ""
+    st.markdown(
+        f"""
+        <div style="border:1px solid #e0e8e8; border-left:5px solid #2cb7b9; border-radius:6px; padding:10px 18px; background-color:#ffffff; margin-top:8px;">
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; text-align:center; align-items:center;">
+                <div>
+                    <div style="font-size:12.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase;">{ans_label}</div>
+                    <div style="font-size:21px; font-weight:800; color:#1a1a1a; margin-top:2px;">{ans_main_str}{sub_ans_html}</div>
+                </div>
+                <div>
+                    <div style="font-size:12.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase;">HF @ {ans_label}</div>
+                    <div style="font-size:21px; font-weight:800; color:#1a1a1a; margin-top:2px;">{hf_ans_str}</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 4. ZEILE (DARUNTER): LTP1 UND DESSEN HF (IDENTISCHES FORMAT WIE ANS, ALLES IN SCHWARZ, BLAUE MARKIERUNG LINKS)
+    sub_ltp1_html = f"<span style='font-size:14px; color:#1a1a1a; font-weight:600; margin-left:8px;'>({ltp1_sub_str})</span>" if ltp1_sub_str else ""
+    st.markdown(
+        f"""
+        <div style="border:1px solid #e0e8e8; border-left:5px solid #2cb7b9; border-radius:6px; padding:10px 18px; background-color:#ffffff; margin-top:8px; margin-bottom:6px;">
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; text-align:center; align-items:center;">
+                <div>
+                    <div style="font-size:12.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase;">{ltp1_label}</div>
+                    <div style="font-size:21px; font-weight:800; color:#1a1a1a; margin-top:2px;">{ltp1_main_str}{sub_ltp1_html}</div>
+                </div>
+                <div>
+                    <div style="font-size:12.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase;">HF @ {ltp1_label}</div>
+                    <div style="font-size:21px; font-weight:800; color:#1a1a1a; margin-top:2px;">{hf_ltp1_str}</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_ans_coaching_diagrams(
+    mode: str,
+    weight_ist: float,
+    bf_ist: float,
+    abs_vo2max_ist: float,
+    rel_vo2max_ist: float,
+    vlamax_ist: float,
+    ans_abs_ist: float,
+    ans_rel_ist: float,
+    solve_ans_fn,
+    default_vo2_pct: float = 5.0,
+    default_vla_pct: float = -10.0,
+    default_bf_delta: float = -1.5,
+    key_prefix: str = "lauf",
+    is_presentation: bool = False,
+):
+    """
+    Rendert die Live Simulation physiologisches Profil (VO2max, VLamax, Fettanteil -> ANS)
+    mit:
+      - Untereinander angeordneten Kennzahlen + Schiebereglern (ohne Nachkommastellen bei VO2max/VLamax, inkl. %)
+      - Wasserfall-Diagramm (ANS Ist & Potenzial in Blau/Türkis, Potenzial-Hebel in Gold)
+      - Spinnendiagramm (Pentagon/Quadrat, Potenzial in Grau gestrichelt)
+    """
+    st.markdown("---")
+    st.subheader("Live Simulation physiologisches Profil")
+
+    # Synchronisierte Session-State-Keys, damit Regler-Werte beim Wechsel zwischen Arbeitsansicht und Präsentations-Modus erhalten bleiben
+    vo2_state_key = f"{key_prefix}_shared_pot_vo2_pct"
+    vla_state_key = f"{key_prefix}_shared_pot_vla_pct"
+    bf_state_key = f"{key_prefix}_shared_pot_bf_target"
+
+    min_bf = max(4.0, round(bf_ist - 8.0, 1))
+    max_bf = min(35.0, round(bf_ist + 5.0, 1))
+    default_bf_target = max(min_bf, min(max_bf, round(bf_ist + default_bf_delta, 1)))
+
+    if vo2_state_key not in st.session_state:
+        st.session_state[vo2_state_key] = int(round(default_vo2_pct if default_vo2_pct != 0 else 5.0))
+    if vla_state_key not in st.session_state:
+        st.session_state[vla_state_key] = int(round(default_vla_pct if default_vla_pct != 0 else -10.0))
+    if bf_state_key not in st.session_state or not (min_bf <= float(st.session_state[bf_state_key]) <= max_bf):
+        st.session_state[bf_state_key] = float(default_bf_target)
+
+    # Vorab aktuelle Regler-Werte aus Session State lesen, damit wir Wert und Schieberegler exakt untereinander in derselben Spalte darstellen können
+    vo2_slider_key = f"{key_prefix}_{'pres' if is_presentation else 'work'}_vo2_pct"
+    vla_slider_key = f"{key_prefix}_{'pres' if is_presentation else 'work'}_vla_pct"
+    bf_slider_key = f"{key_prefix}_{'pres' if is_presentation else 'work'}_bf_target"
+
+    cur_vo2_pct = int(round(float(st.session_state.get(vo2_slider_key, st.session_state[vo2_state_key]))))
+    cur_vla_pct = int(round(float(st.session_state.get(vla_slider_key, st.session_state[vla_state_key]))))
+    cur_bf_pot = float(st.session_state.get(bf_slider_key, st.session_state[bf_state_key]))
+    cur_bf_pot = max(float(min_bf), min(float(max_bf), cur_bf_pot))
+
+    # Vorab-Berechnung mit den aktuellen Slider-Werten
+    ffm_kg = weight_ist * (1.0 - bf_ist / 100.0)
+    weight_pot = ffm_kg / (1.0 - cur_bf_pot / 100.0) if cur_bf_pot < 95.0 else weight_ist
+    abs_vo2max_pot = abs_vo2max_ist * (1.0 + cur_vo2_pct / 100.0)
+    rel_vo2max_pot = abs_vo2max_pot / weight_pot if weight_pot > 0 else rel_vo2max_ist
+    vlamax_pot = max(0.15, vlamax_ist * (1.0 + cur_vla_pct / 100.0))
+
+    ans_abs_0, ans_rel_0 = float(ans_abs_ist), float(ans_rel_ist)
+    ans_abs_1, ans_rel_1 = solve_ans_fn(abs_vo2max_pot, vlamax_ist, weight_ist)
+    ans_abs_2, ans_rel_2 = solve_ans_fn(abs_vo2max_pot, vlamax_pot, weight_ist)
+    ans_abs_3, ans_rel_3 = solve_ans_fn(abs_vo2max_pot, vlamax_pot, weight_pot)
+
+    # Beim Laufen ist die effektive ANS immer die reale Laufgeschwindigkeit (inkl. Gewichtseffekt auf rel. VO2max)
+    if mode == "running":
+        ans_abs_pot = float(ans_rel_3)
+        ans_rel_pot = float(ans_rel_3)
+    else:
+        ans_abs_pot = float(ans_abs_3)
+        ans_rel_pot = float(ans_rel_3)
+
+    # 4 SPALTEN: JEWEILS WERT OBEN & ZUGEHÖRIGER SCHIEBEREGLER DIREKT DARUNTER
+    c_col1, c_col2, c_col3, c_col4 = st.columns([1.05, 1.05, 1.05, 1.15])
+
+    with c_col1:
+        st.metric(
+            "VO2max (Potenzial)",
+            f"{rel_vo2max_pot:.1f} ml/min/kg",
+            f"{rel_vo2max_pot - rel_vo2max_ist:+.1f} ml/min/kg ({int(round(abs_vo2max_pot))} ml)",
+        )
+        d_vo2_pct = st.slider(
+            "Δ VO2max (absolut)",
+            min_value=-10,
+            max_value=20,
+            value=int(cur_vo2_pct),
+            step=1,
+            format="%d %%",
+            key=vo2_slider_key,
+        )
+        st.session_state[vo2_state_key] = int(d_vo2_pct)
+
+    with c_col2:
+        st.metric(
+            "VLamax (Potenzial)",
+            f"{vlamax_pot:.2f} mmol/l/s",
+            f"{vlamax_pot - vlamax_ist:+.2f} mmol/l/s",
+            delta_color="inverse",
+        )
+        d_vla_pct = st.slider(
+            "Δ VLamax",
+            min_value=-30,
+            max_value=20,
+            value=int(cur_vla_pct),
+            step=1,
+            format="%d %%",
+            key=vla_slider_key,
+        )
+        st.session_state[vla_state_key] = int(d_vla_pct)
+
+    with c_col3:
+        st.metric(
+            "Ziel-Gewicht & Körperfett",
+            f"{weight_pot:.1f} kg ({cur_bf_pot:.1f} %)",
+            f"{weight_pot - weight_ist:+.1f} kg ({cur_bf_pot - bf_ist:+.1f} % KF)",
+            delta_color="inverse",
+        )
+        bf_pot = st.slider(
+            "Ziel-Körperfettanteil",
+            min_value=float(min_bf),
+            max_value=float(max_bf),
+            value=float(cur_bf_pot),
+            step=0.5,
+            format="%.1f %%",
+            key=bf_slider_key,
+        )
+        st.session_state[bf_state_key] = float(bf_pot)
+
+    with c_col4:
+        if mode == "running":
+            sec_i_rel = 1000.0 / ans_rel_0 if ans_rel_0 > 0 else 0.0
+            sec_p_rel = 1000.0 / ans_rel_pot if ans_rel_pot > 0 else 0.0
+            st.metric(
+                "ANS (Potenzial)",
+                f"{format_pace_mmss(ans_rel_pot)} min/km",
+                f"{sec_p_rel - sec_i_rel:+.0f} s/km",
+                delta_color="inverse",
+            )
+            wf_target = "ANS relativ"
+        else:
+            sub_c4_a, sub_c4_b = st.columns(2)
+            with sub_c4_a:
+                st.metric(
+                    "ANS absolut",
+                    f"{ans_abs_pot:.0f} W",
+                    f"{ans_abs_pot - ans_abs_0:+.0f} W",
+                )
+            with sub_c4_b:
+                st.metric(
+                    "ANS relativ",
+                    f"{ans_rel_pot:.2f} W/kg",
+                    f"{ans_rel_pot - ans_rel_0:+.2f} W/kg",
+                )
+            wf_target = st.radio(
+                "Wasserfall-Ansicht:",
+                options=["ANS relativ", "ANS absolut"],
+                horizontal=True,
+                key=f"{key_prefix}_{'pres' if is_presentation else 'work'}_wf_target",
+            )
+
+    # Normierungs-Funktion (0..100 Skala analog HYCYS Referenzringen)
+    if mode == "running":
+        ref_params = {
+            "VO2max":     (60.0, 5.0,  False),
+            "VLamax":     (0.55, 0.10, True),
+            "Fettanteil": (13.0, 2.5,  True),
+            "ANS":        (3.5,  0.4,  False),
+        }
+        fmt_ans_ist = f"{format_pace_mmss(ans_rel_0)}/km"
+        fmt_ans_pot = f"{format_pace_mmss(ans_rel_pot)}/km"
+    else:
+        ref_params = {
+            "VO2max":     (62.0,  6.0,  False),
+            "VLamax":     (0.50,  0.10, True),
+            "Fettanteil": (13.0,  2.5,  True),
+            "ANS_abs":    (300.0, 35.0, False),
+            "ANS_rel":    (4.1,   0.45, False),
+        }
+        fmt_ans_abs_ist = f"{ans_abs_0:.0f} W"
+        fmt_ans_abs_pot = f"{ans_abs_pot:.0f} W"
+        fmt_ans_rel_ist = f"{ans_rel_0:.2f} W/kg"
+        fmt_ans_rel_pot = f"{ans_rel_pot:.2f} W/kg"
+
+    def _norm_score(val, key):
+        mean, sd, inv = ref_params[key]
+        span = 6.0 * sd
+        rel = (val - (mean - 3.0 * sd)) / span * 100.0 if span > 0 else 50.0
+        if inv:
+            rel = 100.0 - rel
+        return float(max(5.0, min(98.0, rel)))
+
+    col_wf, col_radar = st.columns([1.3, 1.0])
+
+    # =========================================================================
+    # DIAGRAMM 1 (LINKS): WASSERFALL-DIAGRAMM
+    # Farben: ANS (Ist & Potenzial) in Blau/Türkis (#2cb7b9), Potenzial-Hebel in Gold (#cdb663)
+    # =========================================================================
+    with col_wf:
+        st.markdown("#### Wasserfall-Diagramm (Ist ➔ Potenzial)")
+        use_rel = (mode == "running") or (wf_target == "ANS relativ")
+        if mode == "running":
+            v0, v1, v2, v3 = ans_rel_0, ans_rel_1, ans_rel_2, ans_rel_3
+            y_title = "ANS"
+        elif use_rel:
+            v0, v1, v2, v3 = ans_rel_0, ans_rel_1, ans_rel_2, ans_rel_3
+            y_title = "ANS relativ [W/kg]"
+        else:
+            v0, v1, v2, v3 = ans_abs_0, ans_abs_1, ans_abs_2, ans_abs_3
+            y_title = "ANS absolut [W]"
+
+        step_vo2 = v1 - v0
+        step_vla = v2 - v1
+        step_fat = v3 - v2
+        total_gain = v3 - v0
+
+        def _fmt_delta(d_val, v_before, v_after):
+            if mode == "running":
+                sec_before = 1000.0 / v_before if v_before > 0 else 0.0
+                sec_after = 1000.0 / v_after if v_after > 0 else 0.0
+                d_sec = sec_after - sec_before
+                return f"{d_sec:+.0f} s/km"
+            else:
+                if use_rel:
+                    return f"{d_val:+.2f} W/kg"
+                return f"{d_val:+.0f} W"
+
+        def _fmt_total(v_val):
+            if mode == "running":
+                return f"{format_pace_mmss(v_val)} min/km"
+            else:
+                return f"{v_val:.2f} W/kg" if use_rel else f"{v_val:.0f} W"
+
+        fig_wf = go.Figure(go.Waterfall(
+            name="ANS Brücke",
+            orientation="v",
+            measure=["absolute", "relative", "relative", "relative", "total"],
+            x=[
+                "<b>1. ANS (Ist)</b>",
+                f"<b>2. VO2max</b><br>({int(d_vo2_pct):+d} %)",
+                f"<b>3. VLamax</b><br>({int(d_vla_pct):+d} %)",
+                f"<b>4. Fettanteil</b><br>({bf_ist:.1f}% ➔ {bf_pot:.1f}%)",
+                "<b>5. ANS (Potenzial)</b>",
+            ],
+            y=[v0, step_vo2, step_vla, step_fat, 0],
+            text=[
+                _fmt_total(v0),
+                _fmt_delta(step_vo2, v0, v1),
+                _fmt_delta(step_vla, v1, v2),
+                _fmt_delta(step_fat, v2, v3),
+                f"<b>{_fmt_total(v3)}</b><br>(Gesamt: {_fmt_delta(total_gain, v0, v3)})",
+            ],
+            textposition="outside",
+            textinfo="text",
+            hoverinfo="x+text",
+            connector={"line": {"color": "#595a59", "width": 1.5, "dash": "dot"}},
+            # Potenziale in Gold (#cdb663), ANS (Ist & Potenzial) in Blau/Türkis (#2cb7b9)
+            increasing={"marker": {"color": "#cdb663", "line": {"color": "#9e8836", "width": 1.5}}},
+            decreasing={"marker": {"color": "#595a59", "line": {"color": "#333333", "width": 1.5}}},
+            totals={"marker": {"color": "#2cb7b9", "line": {"color": "#1a1a1a", "width": 2.0}}},
+        ))
+
+        min_v = min(v0, v1, v2, v3)
+        max_v = max(v0, v1, v2, v3)
+        span_v = max(abs(max_v - min_v), max_v * 0.12, 0.15)
+        y_lo = max(0.0, min_v - span_v * 1.4)
+        y_hi = max_v + span_v * 1.15
+
+        fig_wf.update_layout(
+            yaxis=dict(
+                title=y_title,
+                range=[y_lo, y_hi],
+                gridcolor="#e6e6e6",
+                showticklabels=(mode != "running"),
+            ),
+            xaxis=dict(title=""),
+            height=430,
+            margin=dict(l=45, r=30, t=30, b=40),
+            plot_bgcolor="#f9f9f9",
+            showlegend=False,
+        )
+        st.plotly_chart(fig_wf, use_container_width=True)
+
+    # =========================================================================
+    # DIAGRAMM 2 (RECHTS): SPINNENDIAGRAMM
+    # Beim Laufen: 4 Variablen (VO2max, VLamax, ANS, Fettanteil - ohne Trennung ANS abs/rel)
+    # Beim Radfahren: 5 Variablen (VO2max, VLamax, ANS abs. [W], ANS rel. [W/kg], Fettanteil)
+    # =========================================================================
+    with col_radar:
+        st.markdown("#### Spinnendiagramm")
+        fig_pent, ax_p = plt.subplots(figsize=(5.0, 4.8), dpi=250)
+        ax_p.set_aspect("equal")
+
+        if mode == "running":
+            angles_deg = [90.0, 180.0, 270.0, 0.0]
+            angles_rad = [np.deg2rad(a) for a in angles_deg]
+            angles_closed = angles_rad + [angles_rad[0]]
+            s_ist_ord = [
+                _norm_score(rel_vo2max_ist, "VO2max"),
+                _norm_score(vlamax_ist,     "VLamax"),
+                _norm_score(ans_rel_0,      "ANS"),
+                _norm_score(bf_ist,         "Fettanteil"),
+            ]
+            s_pot_ord = [
+                _norm_score(rel_vo2max_pot, "VO2max"),
+                _norm_score(vlamax_pot,     "VLamax"),
+                _norm_score(ans_rel_pot,    "ANS"),
+                _norm_score(bf_pot,         "Fettanteil"),
+            ]
+            s_ist_ord.append(s_ist_ord[0])
+            s_pot_ord.append(s_pot_ord[0])
+            labels_pent = [
+                f"VO2max\n[{rel_vo2max_ist:.1f} ➔ {rel_vo2max_pot:.1f}]",
+                f"VLamax\n[{vlamax_ist:.2f} ➔ {vlamax_pot:.2f}]",
+                f"ANS\n[{format_pace_mmss(ans_rel_0)} ➔ {format_pace_mmss(ans_rel_pot)}/km]",
+                f"Fettanteil\n[{bf_ist:.1f}% ➔ {bf_pot:.1f}%]",
+            ]
+        else:
+            angles_deg = [90.0, 162.0, 234.0, 306.0, 18.0]
+            order_idx = [0, 1, 3, 4, 2]
+            angles_rad = [np.deg2rad(a) for a in angles_deg]
+            angles_closed = angles_rad + [angles_rad[0]]
+            scores_ist = [
+                _norm_score(rel_vo2max_ist, "VO2max"),
+                _norm_score(vlamax_ist,     "VLamax"),
+                _norm_score(bf_ist,         "Fettanteil"),
+                _norm_score(ans_abs_0,      "ANS_abs"),
+                _norm_score(ans_rel_0,      "ANS_rel"),
+            ]
+            scores_pot = [
+                _norm_score(rel_vo2max_pot, "VO2max"),
+                _norm_score(vlamax_pot,     "VLamax"),
+                _norm_score(bf_pot,         "Fettanteil"),
+                _norm_score(ans_abs_pot,    "ANS_abs"),
+                _norm_score(ans_rel_pot,    "ANS_rel"),
+            ]
+            s_ist_ord = [scores_ist[i] for i in order_idx] + [scores_ist[order_idx[0]]]
+            s_pot_ord = [scores_pot[i] for i in order_idx] + [scores_pot[order_idx[0]]]
+            labels_pent = [
+                f"VO2max\n[{rel_vo2max_ist:.1f} ➔ {rel_vo2max_pot:.1f}]",
+                f"VLamax\n[{vlamax_ist:.2f} ➔ {vlamax_pot:.2f}]",
+                f"ANS abs.\n[{fmt_ans_abs_ist} ➔ {fmt_ans_abs_pot}]",
+                f"ANS rel.\n[{fmt_ans_rel_ist} ➔ {fmt_ans_rel_pot}]",
+                f"Fettanteil\n[{bf_ist:.1f}% ➔ {bf_pot:.1f}%]",
+            ]
+
+        for r_ring, col_ring, z_r in [
+            (100, "#cdb663", 1),
+            (80,  "#2cb7b9", 2),
+            (60,  "#ffffff", 3),
+            (35,  "#595a59", 4),
+        ]:
+            xr = [r_ring * np.cos(t) for t in angles_closed]
+            yr = [r_ring * np.sin(t) for t in angles_closed]
+            ax_p.fill(xr, yr, color=col_ring, edgecolor="none", zorder=z_r)
+
+        for t in angles_rad:
+            ax_p.plot([0, 100 * np.cos(t)], [0, 100 * np.sin(t)], color="#595a59", linewidth=0.8, zorder=5)
+        ax_p.plot([100 * np.cos(t) for t in angles_closed], [100 * np.sin(t) for t in angles_closed],
+                  color="#595a59", linewidth=1.2, zorder=8)
+
+        x_i = [r * np.cos(t) for r, t in zip(s_ist_ord, angles_closed)]
+        y_i = [r * np.sin(t) for r, t in zip(s_ist_ord, angles_closed)]
+        ax_p.plot(x_i, y_i, color="#1a1a1a", linewidth=2.6, zorder=6)
+        ax_p.fill(x_i, y_i, color="#1a1a1a", alpha=0.10, zorder=5)
+
+        # Potenzial-Polygon in Grau gestrichelt
+        x_p = [r * np.cos(t) for r, t in zip(s_pot_ord, angles_closed)]
+        y_p = [r * np.sin(t) for r, t in zip(s_pot_ord, angles_closed)]
+        ax_p.plot(x_p, y_p, color="#595a59", linewidth=2.4, linestyle=(0, (4, 2)), zorder=7)
+
+        for lbl, t in zip(labels_pent, angles_rad):
+            r_lbl = 113.0
+            lx, ly = r_lbl * np.cos(t), r_lbl * np.sin(t)
+            ha = "center" if abs(np.cos(t)) < 0.25 else ("left" if np.cos(t) > 0 else "right")
+            va = "bottom" if np.sin(t) > 0.3 else ("top" if np.sin(t) < -0.3 else "center")
+            ax_p.text(
+                lx, ly, lbl, size=7.2, fontweight="bold", color="#1a1a1a", ha=ha, va=va,
+                zorder=10
+            )
+
+        legend_el = [
+            Patch(facecolor="#595a59", label="Schwach"),
+            Patch(facecolor="#ffffff", edgecolor="#cccccc", label="Zu verbessern"),
+            Patch(facecolor="#2cb7b9", label="Gut"),
+            Patch(facecolor="#cdb663", label="Sehr gut"),
+            Line2D([0], [0], color="#1a1a1a", lw=2.5, label="Athlet (Ist)"),
+            Line2D([0], [0], color="#595a59", lw=2.2, ls="--", label="Potenzial"),
+        ]
+        ax_p.legend(handles=legend_el, loc="upper center", bbox_to_anchor=(0.5, -0.04), ncol=3, frameon=False, fontsize=6.8)
+        ax_p.set_xlim(-160, 160)
+        ax_p.set_ylim(-140, 140)
+        ax_p.axis("off")
+        plt.tight_layout()
+        st.pyplot(fig_pent)
+        plt.close(fig_pent)
+
+    return {
+        "weight_pot": weight_pot,
+        "bf_pot": bf_pot,
+        "abs_vo2max_pot": abs_vo2max_pot,
+        "rel_vo2max_pot": rel_vo2max_pot,
+        "vlamax_pot": vlamax_pot,
+        "ans_abs_pot": ans_abs_pot,
+        "ans_rel_pot": ans_rel_pot,
+    }
+
+
 def sync_lauftest_input_df():
     anzahl = int(st.session_state.anzahl)
     start_v = float(st.session_state.start_v)
@@ -164,7 +1615,7 @@ def sync_lauftest_input_df():
     
     stufe_names = ["Ruhe"] + [f"Stufe {i+1}" for i in range(anzahl)]
     speeds = [0.0] + [start_v + (i * v_increment) for i in range(anzahl)]
-    speeds_kmh = [0.0] + [s * 3.6 for s in speeds[1:]]
+    paces = ["-"] + [format_pace_mmss(s) for s in speeds[1:]]
     
     default_ruhe_lac = 1.0
     default_ruhe_hr = 70
@@ -174,14 +1625,12 @@ def sync_lauftest_input_df():
     target_len = anzahl + 1
     
     if "df_lauftest_input" not in st.session_state:
-        lac_values = [default_ruhe_lac] + [default_lac[i] if i < len(default_lac) else 2.0 for i in range(anzahl)]
-        hr_values = [default_ruhe_hr] + [default_hr[i] if i < len(default_hr) else 130 for i in range(anzahl)]
         st.session_state.df_lauftest_input = pd.DataFrame({
             "Stufe": stufe_names,
             "v (m/s)": np.round(speeds, 2),
-            "v (km/h)": np.round(speeds_kmh, 1),
-            "Laktat": lac_values,
-            "HF": hr_values
+            "v (min/km)": paces,
+            "Laktat": [None] * target_len,
+            "HF": [None] * target_len
         })
         st.session_state.last_sync_params = (anzahl, start_v, v_increment)
     else:
@@ -191,30 +1640,30 @@ def sync_lauftest_input_df():
         expected_speeds = [0.0] + [round(start_v + (i * v_increment), 2) for i in range(anzahl)]
         current_speeds = [round(float(s), 2) if pd.notna(s) else 0.0 for s in df["v (m/s)"].values]
         
-        if current_len != target_len or current_speeds != expected_speeds:
+        if current_len != target_len or current_speeds != expected_speeds or "v (min/km)" not in df.columns or "v (km/h)" in df.columns:
             if "lauftest_lac_editor_key" in st.session_state:
                 del st.session_state["lauftest_lac_editor_key"]
             if current_len != target_len:
                 if target_len > current_len:
                     new_rows = []
                     for i in range(current_len, target_len):
-                        idx = i - 1
-                        lac_val = default_lac[idx] if idx < len(default_lac) else 2.0
-                        hr_val = default_hr[idx] if idx < len(default_hr) else 130
                         new_rows.append({
                             "Stufe": stufe_names[i],
                             "v (m/s)": round(speeds[i], 2),
-                            "v (km/h)": round(speeds_kmh[i], 1),
-                            "Laktat": lac_val,
-                            "HF": hr_val
+                            "v (min/km)": paces[i],
+                            "Laktat": None,
+                            "HF": None
                         })
                     df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
                 else:
                     df = df.iloc[:target_len].copy()
             
+            if "v (km/h)" in df.columns:
+                df = df.drop(columns=["v (km/h)"])
             df["Stufe"] = stufe_names
             df["v (m/s)"] = np.round(speeds, 2)
-            df["v (km/h)"] = np.round(speeds_kmh, 1)
+            df["v (min/km)"] = paces
+            df = df[["Stufe", "v (m/s)", "v (min/km)", "Laktat", "HF"]]
             st.session_state.df_lauftest_input = df
             st.session_state.last_sync_params = (anzahl, start_v, v_increment)
 
@@ -357,14 +1806,14 @@ elif sportart == "Radsport":
         key="spiro_rampe_key"
     )
     uploaded_fit = st.sidebar.file_uploader(
-        "VO2max Rampe .fit-Datei hochladen (.fit)", 
-        type=["fit"], 
+        "VO2max Rampe Datei hochladen (.fit, .srm)", 
+        type=["fit", "srm"], 
         key="fit_rampe_key"
     )
 
     st.sidebar.caption(
         "Original SRM-Ergometer Datei (.srm), Garmin/SRM Export (.fit) oder Sprint-Excel-Datei (.xlsx) hochladen. "
-        "Power [W] und Trittfrequenz werden automatisch ausgelesen."
+        "Power [W], Zeit und Trittfrequenz werden automatisch ausgelesen."
     )
 
     if uploaded_sprint is not None and uploaded_sprint.name != st.session_state.get("last_uploaded_sprint"):
@@ -407,10 +1856,16 @@ elif sportart == "Radsport":
                         _records, _hdr = _conv.parse_srm7_data(_srm_data, slope=_slope, zero_offset=_offset, trim_zeros=True)
                         _rec_int_label = f"{_hdr['rec_int']}s (SRM)"
                         _src_name = uploaded_sprint.name
+                        _srm_ath = _hdr.get("athlete_name", "").strip()
+                        _srm_dt = _hdr["record_date"].strftime("%d.%m.%Y") if _hdr.get("record_date") else None
+                        if _srm_ath or _srm_dt:
+                            update_base_data(_srm_ath or None, None, None, None, _srm_dt)
                     else:  # .fit
                         _records, _ath, _date = _conv.parse_fit_file(tmp_raw_path, trim_zeros=True)
                         _rec_int_label = "1s (FIT)"
                         _src_name = uploaded_sprint.name
+                        if _ath or _date:
+                            update_base_data(_ath or None, None, None, None, _date or None)
                     
                     if _records:
                         sprint_powers = [float(r.get("power_w", r.get("power", 0))) for r in _records]
@@ -439,7 +1894,8 @@ elif sportart == "Radsport":
                 if t_alak is None:
                     times_after_pmax = [t for t in sprint_times if t > t_pmax_last]
                     t_alak = times_after_pmax[-1] if times_after_pmax else (t_pmax_last + 0.1)
-                t_bel = max(sprint_times)
+                t_bel, _plateau_start_idx = detect_sprint_end(sprint_powers, sprint_times)
+                st.session_state.sprint_plateau_start_idx = _plateau_start_idx
                 
                 st.session_state.t_bel_auto = round(t_bel, 1)
                 st.session_state.t_alak_auto = round(t_alak, 1)
@@ -454,7 +1910,11 @@ elif sportart == "Radsport":
                 st.session_state.sprint_src_name = _src_name
                 st.session_state.rad_auswertung_gestartet = False
                 
-                st.success(f"✅ Geladen [{_format_info}]: {len(sprint_powers)} Punkte, Max {int(p_max)}W, Dauer {t_bel:.1f}s — Nullwerte am Anfang automatisch entfernt.")
+                _plateau_info = (
+                    f" Leistungsplateau am Ende erkannt — Sprintdauer bis {t_bel:.1f}s gewertet (Aufzeichnung {max(sprint_times):.1f}s)."
+                    if _plateau_start_idx is not None else ""
+                )
+                st.success(f"✅ Geladen [{_format_info}]: {len(sprint_powers)} Punkte, Max {int(p_max)}W, Dauer {t_bel:.1f}s — Nullwerte am Anfang automatisch entfernt.{_plateau_info}")
                 st.rerun()
             else:
                 st.warning("Keine Leistungsdaten gefunden.")
@@ -516,27 +1976,55 @@ elif sportart == "Radsport":
         except Exception as e:
             st.error(f"Fehler beim Auslesen der Spirodatei: {e}")
 
-    # FIT uploader moved to the top of sidebar
+    # FIT / SRM Rampen-Uploader moved to the top of sidebar
     if uploaded_fit is not None and uploaded_fit.name != st.session_state.get("last_uploaded_fit"):
         st.session_state.last_uploaded_fit = uploaded_fit.name
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".fit") as tmp:
+        _ramp_ext = os.path.splitext(uploaded_fit.name)[1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=_ramp_ext) as tmp:
             tmp.write(uploaded_fit.getvalue())
             tmp_path = tmp.name
         try:
-            import fitparse
-            fitfile = fitparse.FitFile(tmp_path)
             records_fit = []
-            for record in fitfile.get_messages("record"):
-                vals = record.get_values()
-                ts = vals.get("timestamp")
-                p = vals.get("power")
-                hr = vals.get("heart_rate")
-                if ts is not None:
+            if _ramp_ext == ".srm":
+                import importlib.util as _ilu_r
+                _spec_r = _ilu_r.spec_from_file_location(
+                    "convert_sprint_ramp",
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "convert_sprint_to_excel.py")
+                )
+                _conv_r = _ilu_r.module_from_spec(_spec_r)
+                _spec_r.loader.exec_module(_conv_r)
+                with open(tmp_path, "rb") as _rf:
+                    _ramp_srm_bytes = _rf.read()
+                _r_recs, _r_hdr = _conv_r.parse_srm7_data(_ramp_srm_bytes, trim_zeros=False)
+                _r_ath = _r_hdr.get("athlete_name", "").strip()
+                _r_dt_obj = _r_hdr.get("record_date")
+                _r_dt_str = _r_dt_obj.strftime("%d.%m.%Y") if _r_dt_obj else None
+                if _r_ath or _r_dt_str:
+                    update_base_data(_r_ath or None, None, None, None, _r_dt_str)
+                _base_dt = datetime.combine(_r_dt_obj, datetime.min.time()) if _r_dt_obj else datetime(2026, 1, 1)
+                for _rr in _r_recs:
+                    _t_abs = float(_rr.get("t_abs", _rr.get("elapsed_s", 0.0)))
+                    _ts = _base_dt + pd.Timedelta(seconds=int(_t_abs))
+                    _hr_v = float(_rr.get("heart_rate", 0))
                     records_fit.append({
-                        "timestamp": ts,
-                        "Power": float(p) if p is not None else 0.0,
-                        "HR": float(hr) if hr is not None else np.nan
+                        "timestamp": _ts,
+                        "Power": float(_rr.get("power_w", 0.0)),
+                        "HR": _hr_v if _hr_v > 0 else np.nan,
                     })
+            else:
+                import fitparse
+                fitfile = fitparse.FitFile(tmp_path)
+                for record in fitfile.get_messages("record"):
+                    vals = record.get_values()
+                    ts = vals.get("timestamp")
+                    p = vals.get("power")
+                    hr = vals.get("heart_rate")
+                    if ts is not None:
+                        records_fit.append({
+                            "timestamp": ts,
+                            "Power": float(p) if p is not None else 0.0,
+                            "HR": float(hr) if hr is not None else np.nan
+                        })
             
             if records_fit:
                 df_raw = pd.DataFrame(records_fit)
@@ -574,7 +2062,7 @@ elif sportart == "Radsport":
             st.session_state.rad_auswertung_gestartet = False
             st.rerun()
         except Exception as e:
-            st.error(f"Fehler beim Auslesen der FIT-Datei: {e}")
+            st.error(f"Fehler beim Auslesen der Rampen-Datei: {e}")
         finally:
             if os.path.exists(tmp_path): os.unlink(tmp_path)
 
@@ -1125,299 +2613,497 @@ elif sportart == "Radsport":
         st.session_state.pot_match = float(pot_match_rel)
         st.session_state.pot_pmax = float(pot_pmax_rel)
         
-        # Render Main Panels
-        st.markdown(f"""
-            <div style="font-size: 16px; line-height: 1.5; margin-bottom: 20px;">
-                <b>Athlet:</b> {athlete_name}<br>
-                <b>Sportart:</b> Radsport<br>
-                <b>Test-Datum:</b> {test_date}<br>
-                <b>Kategorie:</b> {kategorie} | <b>Coach:</b> {coach}
-            </div>
-            """, unsafe_allow_html=True)
-            
-        st.subheader("Stammdaten & Anthropometrie")
-        col_base_1, col_base_2, col_base_3 = st.columns(3)
-        with col_base_1:
-            st.markdown(f"**Gewicht:** {weight:.1f} kg")
-            st.markdown(f"**Größe:** {height} cm")
-            st.markdown(f"**BMI:** {bmi:.2f} kg/m²")
-        with col_base_2:
-            st.markdown(f"**Körperfett:** {body_fat_pct:.1f} %")
-            st.markdown(f"**Fettmasse:** {fett_kg:.1f} kg")
-            st.markdown(f"**Fettfreie Masse:** {fettfrei_kg:.1f} kg")
-        with col_base_3:
-            st.markdown(f"**Geburtsdatum:** {birthdate}")
-            st.markdown(f"**Testdatum:** {test_date}")
-            st.markdown(f"**Alter:** {st.session_state.get('birthdate', birthdate)}")
-            
-        st.markdown("---")
-        st.subheader("⚡ Physiologische Kennzahlen & Ergebnisse")
-        
-        # Grid layout for metrics
-        c_1, c_2, c_3, c_4 = st.columns(4)
-        with c_1:
-            st.metric("VO2max (abs.)", f"{int(abs_vo2max)} ml/min")
-            st.caption(f"Quelle: {vo2_source_lbl}")
-        with c_2:
-            st.metric("VO2max (rel.)", f"{rel_vo2max:.1f} ml/min/kg")
-            st.caption(f"FFM: {vo2_ffm:.1f} ml/min/kg FFM")
-        with c_3:
-            st.metric("VLamax", f"{vlamax:.3f} mmol/l/s")
-            st.caption(f"t_alak: {t_alak:.1f}s | t_bel: {t_bel:.1f}s")
-        with c_4:
-            st.metric("MAP (max. Leistung)", f"{map_val:.1f} W")
-            st.caption(f"relativ: {map_val/weight:.2f} W/kg")
-            
-        c_5, c_6, c_7, c_8 = st.columns(4)
-        with c_5:
-            st.metric("ANS Schwelle (PMLSSc)", f"{ans_power} W")
-            st.caption(f"rel: {ans_rel:.2f} W/kg | EE ges: {int(ans_ee_gesamt)} kcal/h")
-        with c_6:
-            st.metric("Herzfrequenz @ ANS", f"{int(ans_hr)} bpm")
-            st.caption(f"VO2 abs: {int(ans_vo2_abs)} ml/min")
-        with c_7:
-            st.metric("Fatmax Leistung", f"{fatmax_power} W")
-            st.caption(f"rel: {fatmax_rel:.2f} W/kg | EE Fett: {int(fatmax_ee_fett)} kcal/h")
-        with c_8:
-            st.metric("Match-Schwelle", f"{carb_match_power} W")
-            st.caption(f"rel: {carb_match_power/weight:.2f} W/kg | Zufuhr: {int(carb_intake)} g/h")
+        # Ansichts-Umschalter: Ansicht 2 (Diagnostik) <-> Ansicht 3 (Präsentations-Modus)
+        if "rad_view_mode" not in st.session_state:
+            st.session_state.rad_view_mode = "🛠️ Diagnostik & Feineinstellung"
 
-        st.markdown("---")
-        
-        # Sprint-Verifizierung Section
-        st.subheader("⏱️ Sprint-Verifizierung & VLamax-Berechnung")
-        col_sprint_1, col_sprint_2 = st.columns([2, 1])
-        
-        with col_sprint_1:
-            if "sprint_powers" in st.session_state and len(st.session_state.sprint_powers) > 0:
-                # Plotly figure for Sprint Verification
-                fig_sprint = go.Figure()
+        col_vm_r1, col_vm_r2 = st.columns([2.2, 1.0])
+        with col_vm_r1:
+            rad_view_sel = st.radio(
+                "Aktive Ansicht:",
+                options=["🛠️ Diagnostik & Feineinstellung", "🖥️ Präsentations-Modus (Athletengespräch)"],
+                index=0 if st.session_state.rad_view_mode == "🛠️ Diagnostik & Feineinstellung" else 1,
+                horizontal=True,
+                key="rad_view_mode_radio",
+            )
+            st.session_state.rad_view_mode = rad_view_sel
+        with col_vm_r2:
+            if st.session_state.rad_view_mode == "🛠️ Diagnostik & Feineinstellung":
+                if st.button("🖥️ In den Präsentations-Modus wechseln", type="primary", use_container_width=True, key="btn_to_pres_rad_top"):
+                    st.session_state.rad_view_mode = "🖥️ Präsentations-Modus (Athletengespräch)"
+                    st.rerun()
+            else:
+                if st.button("🛠️ Zurück zur Diagnostik-Ansicht", use_container_width=True, key="btn_to_diag_rad_top"):
+                    st.session_state.rad_view_mode = "🛠️ Diagnostik & Feineinstellung"
+                    st.rerun()
+
+        def _solve_ans_rad(vo2_abs_in, vla_in, w_in):
+            if w_in <= 0:
+                return float(ans_power), float(ans_rel)
+            rel_vo2_in = vo2_abs_in / w_in
+            best_p = float(ans_power)
+            min_d = 1e9
+            for p_cand in range(50, 601):
+                vo2ss_c = (p_cand * ks4 / w_in) + vo2_rest
+                if rel_vo2_in - vo2ss_c <= 0:
+                    break
+                adp_c = np.sqrt((ks1 * vo2ss_c) / (rel_vo2_in - vo2ss_c))
+                vlass_c = (vla_in * 60.0) / (1.0 + ks2 / (adp_c ** 3))
+                vlaox_c = (lac_eq / lac_dist) * vo2ss_c
+                if vlass_c >= vlaox_c:
+                    best_p = float(p_cand)
+                    break
+                d_c = abs(vlaox_c - vlass_c)
+                if d_c < min_d:
+                    min_d = d_c
+                    best_p = float(p_cand)
+            return best_p, best_p / w_in
+
+        is_rad_pres = (st.session_state.rad_view_mode == "🖥️ Präsentations-Modus (Athletengespräch)")
+
+        # Render Main Panels
+        fatmax_hr_val = int(round(fatmax_row['hr'])) if 'hr' in fatmax_row and not np.isnan(fatmax_row['hr']) else int(round(fatmax_power * slope_val + intercept_val))
+        if is_rad_pres:
+            st.markdown(f"""
+                <div style="font-size: 16px; line-height: 1.5; margin-bottom: 16px; padding: 12px 16px; border-left: 5px solid #2cb7b9; background-color: #f8fafa; border-radius: 4px;">
+                    <b>Athlet:</b> {athlete_name} &nbsp;|&nbsp; <b>Test-Datum:</b> {test_date}
+                </div>
+                """, unsafe_allow_html=True)
+            render_hycys_top_basisdaten(
+                weight=float(weight),
+                body_fat_pct=float(body_fat_pct),
+                rel_vo2max=float(rel_vo2max),
+                abs_vo2max=float(abs_vo2max),
+                vlamax_str=f"{vlamax:.2f}".replace(".", ",") + " mmol/l/s",
+                ans_label="ANS / LTP2 (Schwelle)",
+                ans_main_str=f"{int(ans_power)} W",
+                ans_sub_str=f"Relativ: {ans_rel:.2f}".replace(".", ",") + " W/kg",
+                ans_hr_str=f"{int(round(ans_hr))} bpm",
+                ltp1_label="LTP1 / Fatmax",
+                ltp1_main_str=f"{int(fatmax_power)} W",
+                ltp1_sub_str=f"Relativ: {fatmax_rel:.2f}".replace(".", ",") + " W/kg",
+                ltp1_hr_str=f"{fatmax_hr_val} bpm",
+            )
+        else:
+            st.markdown(f"""
+                <div style="font-size: 16px; line-height: 1.5; margin-bottom: 16px; padding: 12px 16px; border-left: 5px solid #2cb7b9; background-color: #f8fafa; border-radius: 4px;">
+                    <b>Athlet:</b> {athlete_name} &nbsp;|&nbsp; <b>Sportart:</b> Radsport &nbsp;|&nbsp; <b>Test-Datum:</b> {test_date} &nbsp;|&nbsp; <b>Kategorie:</b> {kategorie} &nbsp;|&nbsp; <b>Coach:</b> {coach}
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.subheader("Stammdaten & Anthropometrie")
+            col_base_1, col_base_2, col_base_3 = st.columns(3)
+            with col_base_1:
+                st.markdown(f"**Gewicht:** {weight:.1f} kg")
+                st.markdown(f"**Größe:** {height} cm")
+                st.markdown(f"**BMI:** {bmi:.2f} kg/m²")
+            with col_base_2:
+                st.markdown(f"**Körperfett:** {body_fat_pct:.1f} %")
+                st.markdown(f"**Fettmasse:** {fett_kg:.1f} kg")
+                st.markdown(f"**Fettfreie Masse:** {fettfrei_kg:.1f} kg")
+            with col_base_3:
+                st.markdown(f"**Geburtsdatum:** {birthdate}")
+                st.markdown(f"**Testdatum:** {test_date}")
+                st.markdown(f"**Alter:** {st.session_state.get('birthdate', birthdate)}")
                 
-                # Line for sprint powers
-                fig_sprint.add_trace(go.Scatter(
-                    x=st.session_state.sprint_times,
-                    y=st.session_state.sprint_powers,
+            st.markdown("---")
+            st.subheader("⚡ Physiologische Kennzahlen & Ergebnisse (Ist-Zustand)")
+            
+            # Grid layout for metrics
+            c_1, c_2, c_3, c_4 = st.columns(4)
+            with c_1:
+                st.metric("VO2max (abs.)", f"{int(abs_vo2max)} ml/min")
+                st.caption(f"Quelle: {vo2_source_lbl}")
+            with c_2:
+                st.metric("VO2max (rel.)", f"{rel_vo2max:.1f} ml/min/kg")
+                st.caption(f"FFM: {vo2_ffm:.1f} ml/min/kg FFM")
+            with c_3:
+                st.metric("VLamax", f"{vlamax:.3f} mmol/l/s")
+                st.caption(f"t_alak: {t_alak:.1f}s | t_bel: {t_bel:.1f}s")
+            with c_4:
+                st.metric("MAP (max. Leistung)", f"{map_val:.1f} W")
+                st.caption(f"relativ: {map_val/weight:.2f} W/kg")
+                
+            c_5, c_6, c_7, c_8 = st.columns(4)
+            with c_5:
+                st.metric("ANS Schwelle (PMLSSc)", f"{ans_power} W")
+                st.caption(f"rel: {ans_rel:.2f} W/kg | EE ges: {int(ans_ee_gesamt)} kcal/h")
+            with c_6:
+                st.metric("Herzfrequenz @ ANS", f"{int(ans_hr)} bpm")
+                st.caption(f"VO2 abs: {int(ans_vo2_abs)} ml/min")
+            with c_7:
+                st.metric("Fatmax Leistung", f"{fatmax_power} W")
+                st.caption(f"rel: {fatmax_rel:.2f} W/kg | EE Fett: {int(fatmax_ee_fett)} kcal/h")
+            with c_8:
+                st.metric("Match-Schwelle", f"{carb_match_power} W")
+                st.caption(f"rel: {carb_match_power/weight:.2f} W/kg | Zufuhr: {int(carb_intake)} g/h")
+
+        # Im Präsentations-Modus steht das interaktive Coaching-Potenzial direkt unter den Kennzahlen im Mittelpunkt
+        if is_rad_pres:
+            render_ans_coaching_diagrams(
+                mode="cycling",
+                weight_ist=float(weight),
+                bf_ist=float(body_fat_pct),
+                abs_vo2max_ist=float(abs_vo2max),
+                rel_vo2max_ist=float(rel_vo2max),
+                vlamax_ist=float(vlamax),
+                ans_abs_ist=float(ans_power),
+                ans_rel_ist=float(ans_rel),
+                solve_ans_fn=_solve_ans_rad,
+                default_vo2_pct=float(vo2_change * 100.0) if vo2_change != 0 else 5.0,
+                default_vla_pct=float(vla_change * 100.0) if vla_change != 0 else -10.0,
+                default_bf_delta=-1.5,
+                key_prefix="rad",
+                is_presentation=True,
+            )
+
+            # Fett & Kohlenhydrat Stoffwechsel im Präsentations-Modus auch für Radfahren einblenden (mit Mouseover für g/h KH, g/h Fett & kcal/h)
+            st.markdown("---")
+            st.subheader("Fett & Kohlenhydrat Stoffwechsel")
+            max_x_pres_rad = int(min(600, max(300, np.ceil((ans_power + 50) / 10.0) * 10.0)))
+            df_plot_pres = df_sim[df_sim['power'] <= max_x_pres_rad].dropna(subset=['ee_gesamt']).copy()
+            if not df_plot_pres.empty:
+                p_vals_r = df_plot_pres['power'].values
+                ee_tot_r = df_plot_pres['ee_gesamt'].values
+                ee_fat_r = df_plot_pres['ee_fett'].values
+                fat_g_r = ee_fat_r / 9.3
+                kh_g_r = df_plot_pres['ee_kh_g'].values
+                kh_kcal_r = kh_g_r * 4.063
+                custom_rad_hover = np.column_stack([
+                    [f"{int(p)}" for p in p_vals_r],
+                    [f"{p / weight:.2f}".replace(".", ",") for p in p_vals_r],
+                    [f"{int(round(v))}" for v in ee_tot_r],
+                    [f"{v:.1f}".replace(".", ",") for v in fat_g_r],
+                    [f"{int(round(v))}" for v in ee_fat_r],
+                    [f"{v:.1f}".replace(".", ",") for v in kh_g_r],
+                    [f"{int(round(v))}" for v in kh_kcal_r],
+                ])
+                fig_met_pres = go.Figure()
+                fig_met_pres.add_trace(go.Scatter(
+                    x=p_vals_r, y=ee_tot_r,
                     mode='lines',
-                    line=dict(color='#00a1e0', width=3),
-                    name='Leistung'
+                    line=dict(color='#595a59', width=3),
+                    name='Gesamtenergieverbrauch [kcal/h]',
+                    customdata=custom_rad_hover,
+                    hovertemplate=(
+                        "<b>Leistung: %{customdata[0]} W (%{customdata[1]} W/kg)</b><br>"
+                        "Gesamtenergie: <b>%{customdata[2]} kcal/h</b><br>"
+                        "Fettstoffwechsel: <b>%{customdata[3]} g/h Fett</b> (%{customdata[4]} kcal/h)<br>"
+                        "Kohlenhydrate: <b>%{customdata[5]} g/h KH</b> (%{customdata[6]} kcal/h)"
+                        "<extra></extra>"
+                    ),
+                    yaxis='y'
                 ))
-                
-                # Find p_max and t_pmax_last to draw lines
-                sprint_pmax = max(st.session_state.sprint_powers)
-                sprint_palak = 0.965 * sprint_pmax
-                
-                # Add horizontal line for P_alak (96.5% Pmax)
-                fig_sprint.add_hline(
-                    y=sprint_palak,
-                    line_dash="dot",
-                    line_color="#cdb663",
-                    annotation_text=f"96.5% Pmax ({sprint_palak:.0f} W)",
-                    annotation_position="bottom left"
-                )
-                
-                # Shaded region for Alactic phase (0 to t_alak)
-                fig_sprint.add_vrect(
-                    x0=0.0, x1=t_alak,
-                    fillcolor="rgba(0, 161, 224, 0.1)",
-                    layer="below", line_width=0,
-                    annotation_text="Alaktazid (t_alak)",
+                fig_met_pres.add_trace(go.Scatter(
+                    x=p_vals_r, y=ee_fat_r,
+                    mode='lines',
+                    line=dict(color='#2cb7b9', width=3),
+                    name='Fettstoffwechsel [kcal/h]',
+                    hoverinfo='skip',
+                    yaxis='y'
+                ))
+                fig_met_pres.add_trace(go.Scatter(
+                    x=p_vals_r, y=kh_g_r,
+                    mode='lines',
+                    line=dict(color='#cdb663', width=3),
+                    name='Kohlenhydratverbrauch [g/h]',
+                    hoverinfo='skip',
+                    yaxis='y2'
+                ))
+                fig_met_pres.add_vline(
+                    x=fatmax_power,
+                    line_dash="dash",
+                    line_color="#2cb7b9",
+                    annotation_text=f"Fatmax ({fatmax_power} W)",
                     annotation_position="top left"
                 )
+                fig_met_pres.add_vline(
+                    x=ans_power,
+                    line_dash="dash",
+                    line_color="#595a59",
+                    annotation_text=f"ANS ({ans_power} W)",
+                    annotation_position="top right"
+                )
+                fig_met_pres.update_layout(
+                    xaxis=dict(title="Leistung [Watt]", range=[0, int(p_vals_r[-1])], gridcolor="#e6e6e6"),
+                    yaxis=dict(
+                        title=dict(text="Energie [kcal/h]", font=dict(color="#595a59")),
+                        tickfont=dict(color="#595a59"),
+                        range=[0, float(np.max(ee_tot_r)) * 1.12],
+                        gridcolor="#e6e6e6",
+                    ),
+                    yaxis2=dict(
+                        title=dict(text="Kohlenhydratverbrauch [g/h]", font=dict(color="#cdb663")),
+                        tickfont=dict(color="#cdb663"),
+                        range=[0, float(np.max(kh_g_r)) * 1.12],
+                        overlaying="y",
+                        side="right",
+                        showgrid=False,
+                    ),
+                    hovermode="x",
+                    height=400,
+                    legend=dict(orientation="h", x=0.5, xanchor="center", y=1.12, bgcolor="rgba(255,255,255,0.85)"),
+                    margin=dict(l=50, r=50, t=45, b=45),
+                    plot_bgcolor='#f9f9f9'
+                )
+                st.plotly_chart(fig_met_pres, use_container_width=True)
+
+        if not is_rad_pres:
+            st.markdown("---")
+            
+            # Sprint-Verifizierung Section (nur in Diagnostik-Ansicht)
+            st.subheader("⏱️ Sprint-Verifizierung & VLamax-Berechnung")
+            col_sprint_1, col_sprint_2 = st.columns([2, 1])
+            
+            with col_sprint_1:
+                if "sprint_powers" in st.session_state and len(st.session_state.sprint_powers) > 0:
+                    fig_sprint = go.Figure()
+                    fig_sprint.add_trace(go.Scatter(
+                        x=st.session_state.sprint_times,
+                        y=st.session_state.sprint_powers,
+                        mode='lines',
+                        line=dict(color='#00a1e0', width=3),
+                        name='Leistung'
+                    ))
+                    sprint_pmax = max(st.session_state.sprint_powers)
+                    sprint_palak = 0.965 * sprint_pmax
+                    fig_sprint.add_hline(
+                        y=sprint_palak,
+                        line_dash="dot",
+                        line_color="#cdb663",
+                        annotation_text=f"96.5% Pmax ({sprint_palak:.0f} W)",
+                        annotation_position="bottom left"
+                    )
+                    fig_sprint.add_vrect(
+                        x0=0.0, x1=t_alak,
+                        fillcolor="rgba(0, 161, 224, 0.1)",
+                        layer="below", line_width=0,
+                        annotation_text="Alaktazid (t_alak)",
+                        annotation_position="top left"
+                    )
+                    fig_sprint.add_vrect(
+                        x0=t_alak, x1=t_bel,
+                        fillcolor="rgba(205, 182, 99, 0.1)",
+                        layer="below", line_width=0,
+                        annotation_text="Glykolytisch (t_glyc)",
+                        annotation_position="top right"
+                    )
+                    # Ende der gewerteten Sprintdauer (t_bel) sichtbar machen
+                    _sp_t_max = float(max(st.session_state.sprint_times))
+                    if _sp_t_max > t_bel + 0.05:
+                        fig_sprint.add_vrect(
+                            x0=t_bel, x1=_sp_t_max,
+                            fillcolor="rgba(150, 150, 150, 0.18)",
+                            layer="below", line_width=0,
+                            annotation_text="nicht gewertet (Leistungsplateau)",
+                            annotation_position="bottom right",
+                            annotation_font=dict(size=10, color="#777"),
+                        )
+                    fig_sprint.add_vline(
+                        x=t_bel,
+                        line_dash="dash",
+                        line_color="#d62728",
+                        line_width=2,
+                        annotation_text=f"Ende Sprint t_bel = {t_bel:.1f} s",
+                        annotation_position="top left",
+                        annotation_font=dict(size=11, color="#d62728"),
+                    )
+                    fig_sprint.update_layout(
+                        xaxis_title="Zeit [Sekunden]",
+                        yaxis_title="Leistung [Watt]",
+                        height=350,
+                        margin=dict(l=40, r=40, t=20, b=40),
+                        plot_bgcolor='#f9f9f9',
+                        legend=dict(x=0.02, y=0.98, bgcolor="rgba(255,255,255,0.7)")
+                    )
+                    st.plotly_chart(fig_sprint, use_container_width=True)
+                else:
+                    st.info("ℹ️ Keine Sprint-Rohdaten hochgeladen. Es wird die standardmäßig konfigurierte Belastungsdauer verwendet.")
+                    
+            with col_sprint_2:
+                st.markdown(f"""
+                <div style="border: 1px solid #e6e6e6; border-radius: 8px; padding: 15px; background-color: #f9f9f9; color: #222;">
+                    <h4 style="margin-top:0; color: #111;">Dauer der Phasen</h4>
+                    <table style="width:100%; border-collapse: collapse;">
+                        <tr style="border-bottom: 1px solid #e6e6e6;">
+                            <td style="padding: 6px 0;"><b>Gesamtdauer (t_bel):</b></td>
+                            <td style="text-align:right;">{t_bel:.1f} s</td>
+                        </tr>
+                        {(f'<tr style="border-bottom: 1px solid #e6e6e6; color:#777; font-size:0.85em;"><td style="padding: 4px 0;" colspan="2">Leistungsplateau am Ende (&gt; {SPRINT_PLATEAU_MIN_POINTS} gleiche Werte) ab {t_bel:.1f} s nicht gewertet (Aufzeichnung bis {float(max(st.session_state.sprint_times)):.1f} s)</td></tr>') if (st.session_state.get("sprint_times") and float(max(st.session_state.sprint_times)) > t_bel + 0.05) else ''}
+                        <tr style="border-bottom: 1px solid #e6e6e6;">
+                            <td style="padding: 6px 0;"><b>Alaktazide Phase (t_alak):</b></td>
+                            <td style="text-align:right;">{t_alak:.1f} s</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid #e6e6e6; color: #cdb663;">
+                            <td style="padding: 6px 0;"><b>Glykolytische Phase (t_glyc):</b></td>
+                            <td style="text-align:right;"><b>{t_glyc:.1f} s</b></td>
+                        </tr>
+                    </table>
+                    <h4 style="margin-top: 15px; color: #111;">Laktat-Differenz</h4>
+                    <table style="width:100%; border-collapse: collapse;">
+                        <tr style="border-bottom: 1px solid #e6e6e6;">
+                            <td style="padding: 6px 0;">Ruhelaktat (Mittelwert):</td>
+                            <td style="text-align:right;">{avg_rest_lac:.2f} mmol/L</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid #e6e6e6;">
+                            <td style="padding: 6px 0;">Peak-Laktat (post-sprint):</td>
+                            <td style="text-align:right;">{max_post_lac:.2f} mmol/L</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid #e6e6e6; color: #00a1e0;">
+                            <td style="padding: 6px 0;"><b>Laktat-Anstieg (&Delta;La):</b></td>
+                            <td style="text-align:right;"><b>{(max_post_lac - avg_rest_lac):.2f} mmol/L</b></td>
+                        </tr>
+                    </table>
+                    <h4 style="margin-top:15px; margin-bottom:5px; color: #111;">VLamax Berechnung</h4>
+                    <div style="font-family: monospace; font-size:13px; background-color:#ffffff; padding:10px; border-radius:4px; border: 1px solid #e6e6e6; text-align:center; color: #111;">
+                        VLamax = &Delta;La / t_glyc <br>
+                        VLamax = {max_post_lac - avg_rest_lac:.2f} / {t_glyc:.1f} <br>
+                        <b>VLamax = {vlamax:.3f} mmol/l/s</b>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            # Diagrams layout
+            col_plot_1, col_plot_2 = st.columns(2)
+            
+            with col_plot_1:
+                st.subheader("📈 Laktatkinetik (Metabolischer Crossover)")
                 
-                # Shaded region for Glycolytic phase (t_alak to t_bel)
-                fig_sprint.add_vrect(
-                    x0=t_alak, x1=t_bel,
-                    fillcolor="rgba(205, 182, 99, 0.1)",
-                    layer="below", line_width=0,
-                    annotation_text="Glykolytisch (t_glyc)",
+                # Plotly figure for crossover
+                fig_cross = go.Figure()
+                max_x_plot = int(min(600, max(300, np.ceil((ans_power + 50) / 10.0) * 10.0)))
+                df_plot = df_sim[df_sim['power'] <= max_x_plot]
+                
+                fig_cross.add_trace(go.Scatter(
+                    x=df_plot['power'], y=df_plot['vlass'],
+                    mode='lines',
+                    line=dict(color='#00a1e0', width=3),
+                    name='Laktatbildung (VLass)'
+                ))
+                fig_cross.add_trace(go.Scatter(
+                    x=df_plot['power'], y=df_plot['vlaoxmax'],
+                    mode='lines',
+                    line=dict(color='#cdb663', width=3),
+                    name='max. Laktatabbau (VLaoxmax)'
+                ))
+                
+                fig_cross.add_vline(
+                    x=ans_power,
+                    line_dash="dash",
+                    line_color="#595a59",
+                    annotation_text=f"ANS ({ans_power} W)",
                     annotation_position="top right"
                 )
                 
-                fig_sprint.update_layout(
-                    xaxis_title="Zeit [Sekunden]",
-                    yaxis_title="Leistung [Watt]",
-                    height=350,
+                fig_cross.update_layout(
+                    xaxis=dict(title="Leistung [Watt]", range=[0, max_x_plot]),
+                    yaxis_title="Laktatkinetik [mmol/L/min]",
+                    height=400,
+                    legend=dict(x=0.02, y=0.98, bgcolor="rgba(255,255,255,0.7)"),
                     margin=dict(l=40, r=40, t=20, b=40),
-                    plot_bgcolor='#f9f9f9',
-                    legend=dict(x=0.02, y=0.98, bgcolor="rgba(255,255,255,0.7)")
+                    plot_bgcolor='#f9f9f9'
                 )
-                st.plotly_chart(fig_sprint, use_container_width=True)
-            else:
-                st.info("ℹ️ Keine Sprint-Rohdaten hochgeladen. Es wird die standardmäßig konfigurierte Belastungsdauer verwendet.")
+                st.plotly_chart(fig_cross, use_container_width=True)
                 
-        with col_sprint_2:
-            st.markdown(f"""
-            <div style="border: 1px solid #e6e6e6; border-radius: 8px; padding: 15px; background-color: #f9f9f9; color: #222;">
-                <h4 style="margin-top:0; color: #111;">Dauer der Phasen</h4>
-                <table style="width:100%; border-collapse: collapse;">
-                    <tr style="border-bottom: 1px solid #e6e6e6;">
-                        <td style="padding: 6px 0;"><b>Gesamtdauer (t_bel):</b></td>
-                        <td style="text-align:right;">{t_bel:.1f} s</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #e6e6e6;">
-                        <td style="padding: 6px 0;"><b>Alaktazide Phase (t_alak):</b></td>
-                        <td style="text-align:right;">{t_alak:.1f} s</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #e6e6e6; color: #cdb663;">
-                        <td style="padding: 6px 0;"><b>Glykolytische Phase (t_glyc):</b></td>
-                        <td style="text-align:right;"><b>{t_glyc:.1f} s</b></td>
-                    </tr>
-                </table>
-                <h4 style="margin-top: 15px; color: #111;">Laktat-Differenz</h4>
-                <table style="width:100%; border-collapse: collapse;">
-                    <tr style="border-bottom: 1px solid #e6e6e6;">
-                        <td style="padding: 6px 0;">Ruhelaktat (Mittelwert):</td>
-                        <td style="text-align:right;">{avg_rest_lac:.2f} mmol/L</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #e6e6e6;">
-                        <td style="padding: 6px 0;">Peak-Laktat (post-sprint):</td>
-                        <td style="text-align:right;">{max_post_lac:.2f} mmol/L</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #e6e6e6; color: #00a1e0;">
-                        <td style="padding: 6px 0;"><b>Laktat-Anstieg (&Delta;La):</b></td>
-                        <td style="text-align:right;"><b>{(max_post_lac - avg_rest_lac):.2f} mmol/L</b></td>
-                    </tr>
-                </table>
-                <h4 style="margin-top:15px; margin-bottom:5px; color: #111;">VLamax Berechnung</h4>
-                <div style="font-family: monospace; font-size:13px; background-color:#ffffff; padding:10px; border-radius:4px; border: 1px solid #e6e6e6; text-align:center; color: #111;">
-                    VLamax = &Delta;La / t_glyc <br>
-                    VLamax = {max_post_lac - avg_rest_lac:.2f} / {t_glyc:.1f} <br>
-                    <b>VLamax = {vlamax:.3f} mmol/l/s</b>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        st.markdown("---")
-        
-        # Diagrams layout
-        col_plot_1, col_plot_2 = st.columns(2)
-        
-        with col_plot_1:
-            st.subheader("📈 Laktatkinetik (Metabolischer Crossover)")
-            
-            # Plotly figure for crossover
-            fig_cross = go.Figure()
-            # Calculate dynamic max W range based on ANS + 50W (rounded to next 10W)
-            max_x_plot = int(min(600, max(300, np.ceil((ans_power + 50) / 10.0) * 10.0)))
-            df_plot = df_sim[df_sim['power'] <= max_x_plot]
-            
-            fig_cross.add_trace(go.Scatter(
-                x=df_plot['power'], y=df_plot['vlass'],
-                mode='lines',
-                line=dict(color='#00a1e0', width=3),
-                name='Laktatbildung (VLass)'
-            ))
-            fig_cross.add_trace(go.Scatter(
-                x=df_plot['power'], y=df_plot['vlaoxmax'],
-                mode='lines',
-                line=dict(color='#cdb663', width=3),
-                name='max. Laktatabbau (VLaoxmax)'
-            ))
-            
-            # Add vertical line for ANS
-            fig_cross.add_vline(
-                x=ans_power,
-                line_dash="dash",
-                line_color="#595a59",
-                annotation_text=f"ANS ({ans_power} W)",
-                annotation_position="top right"
-            )
-            
-            fig_cross.update_layout(
-                xaxis=dict(title="Leistung [Watt]", range=[0, max_x_plot]),
-                yaxis_title="Laktatkinetik [mmol/L/min]",
-                height=400,
-                legend=dict(x=0.02, y=0.98, bgcolor="rgba(255,255,255,0.7)"),
-                margin=dict(l=40, r=40, t=20, b=40),
-                plot_bgcolor='#f9f9f9'
-            )
-            st.plotly_chart(fig_cross, use_container_width=True)
-            
-        with col_plot_2:
-            st.subheader("📊 Substratumsatz & Energiefluss")
-            
-            # Plotly figure with twin y-axes
-            fig_met = go.Figure()
-            df_plot = df_sim[df_sim['power'] <= max_x_plot]
-            
-            # EE gesamt
-            fig_met.add_trace(go.Scatter(
-                x=df_plot['power'], y=df_plot['ee_gesamt'],
-                mode='lines',
-                line=dict(color='#595a59', width=2.5, dash='dash'),
-                name='Gesamtumsatz [kcal/h]',
-                yaxis='y'
-            ))
-            # EE Fett
-            fig_met.add_trace(go.Scatter(
-                x=df_plot['power'], y=df_plot['ee_fett'],
-                mode='lines',
-                line=dict(color='#2cb7b9', width=3),
-                name='Fettverbrennung [kcal/h]',
-                yaxis='y'
-            ))
-            # KH-Verbrauch
-            fig_met.add_trace(go.Scatter(
-                x=df_plot['power'], y=df_plot['ee_kh_g'],
-                mode='lines',
-                line=dict(color='#cdb663', width=3),
-                name='KH-Verbrennung [g/h]',
-                yaxis='y2'
-            ))
-            
-            # Vertical line for Fatmax
-            fig_met.add_vline(
-                x=fatmax_power,
-                line_dash="dash",
-                line_color="#2cb7b9",
-                annotation_text=f"Fatmax ({fatmax_power} W)",
-                annotation_position="top left"
-            )
-            
-            # Twin axis layout
-            fig_met.update_layout(
-                xaxis=dict(title="Leistung [Watt]", range=[0, max_x_plot]),
-                yaxis=dict(
-                    title=dict(text="Energie [kcal/h]", font=dict(color="#595a59")),
-                    tickfont=dict(color="#595a59")
-                ),
-                yaxis2=dict(
-                    title=dict(text="Kohlenhydratumsatz [g/h]", font=dict(color="#cdb663")),
-                    tickfont=dict(color="#cdb663"),
-                    overlaying="y",
-                    side="right"
-                ),
-                height=400,
-                legend=dict(x=0.02, y=0.98, bgcolor="rgba(255,255,255,0.7)"),
-                margin=dict(l=45, r=45, t=20, b=40),
-                plot_bgcolor='#f9f9f9'
-            )
-            st.plotly_chart(fig_met, use_container_width=True)
+            with col_plot_2:
+                st.subheader("📊 Substratumsatz & Energiefluss")
+                
+                fig_met = go.Figure()
+                df_plot = df_sim[df_sim['power'] <= max_x_plot]
+                
+                fig_met.add_trace(go.Scatter(
+                    x=df_plot['power'], y=df_plot['ee_gesamt'],
+                    mode='lines',
+                    line=dict(color='#595a59', width=2.5, dash='dash'),
+                    name='Gesamtumsatz [kcal/h]',
+                    yaxis='y'
+                ))
+                fig_met.add_trace(go.Scatter(
+                    x=df_plot['power'], y=df_plot['ee_fett'],
+                    mode='lines',
+                    line=dict(color='#2cb7b9', width=3),
+                    name='Fettverbrennung [kcal/h]',
+                    yaxis='y'
+                ))
+                fig_met.add_trace(go.Scatter(
+                    x=df_plot['power'], y=df_plot['ee_kh_g'],
+                    mode='lines',
+                    line=dict(color='#cdb663', width=3),
+                    name='KH-Verbrennung [g/h]',
+                    yaxis='y2'
+                ))
+                
+                fig_met.add_vline(
+                    x=fatmax_power,
+                    line_dash="dash",
+                    line_color="#2cb7b9",
+                    annotation_text=f"Fatmax ({fatmax_power} W)",
+                    annotation_position="top left"
+                )
+                
+                fig_met.update_layout(
+                    xaxis=dict(title="Leistung [Watt]", range=[0, max_x_plot]),
+                    yaxis=dict(
+                        title=dict(text="Energie [kcal/h]", font=dict(color="#595a59")),
+                        tickfont=dict(color="#595a59")
+                    ),
+                    yaxis2=dict(
+                        title=dict(text="Kohlenhydratumsatz [g/h]", font=dict(color="#cdb663")),
+                        tickfont=dict(color="#cdb663"),
+                        overlaying="y",
+                        side="right"
+                    ),
+                    height=400,
+                    legend=dict(x=0.02, y=0.98, bgcolor="rgba(255,255,255,0.7)"),
+                    margin=dict(l=45, r=45, t=20, b=40),
+                    plot_bgcolor='#f9f9f9'
+                )
+                st.plotly_chart(fig_met, use_container_width=True)
 
-        st.markdown("---")
-        
-        # Detailed Grid Table
-        with st.expander("🔍 Detaillierter metabolischer Verlauf (Tabelle in 10W-Schritten)"):
-            df_table_rows = []
-            for p in range(0, max_x_plot + 1, 10):
-                rows = df_sim[df_sim['power'] == p]
-                if not rows.empty:
-                    row_data = rows.iloc[0]
-                    df_table_rows.append({
-                        'Leistung [W]': p,
-                        'VO2ss [ml/min/kg]': round(row_data['vo2ss'], 1) if not np.isnan(row_data['vo2ss']) else "-",
-                        'VLass [mmol/L/min]': round(row_data['vlass'], 3) if not np.isnan(row_data['vlass']) else "-",
-                        'VLaoxmax [mmol/L/min]': round(row_data['vlaoxmax'], 3) if not np.isnan(row_data['vlaoxmax']) else "-",
-                        'Pyruvatdefizit [mmol/L/min]': round(row_data['pyruvat_def'], 3) if not np.isnan(row_data['pyruvat_def']) else "-",
-                        'KH-Anteil [%]': f"{round(row_data['kh_pct'], 1)}%" if not np.isnan(row_data['kh_pct']) else "-",
-                        'Fett-Anteil [%]': f"{round(row_data['fat_pct'], 1)}%" if not np.isnan(row_data['fat_pct']) else "-",
-                        'kalk. RQ': round(row_data['rq'], 3) if not np.isnan(row_data['rq']) else "-",
-                        'EE gesamt [kcal/h]': int(round(row_data['ee_gesamt'], 0)) if not np.isnan(row_data['ee_gesamt']) else "-",
-                        'EE Fett [kcal/h]': int(round(row_data['ee_fett'], 0)) if not np.isnan(row_data['ee_fett']) else "-",
-                        'KH-Verbrauch [g/h]': round(row_data['ee_kh_g'], 1) if not np.isnan(row_data['ee_kh_g']) else "-",
-                        'HF [bpm]': f"{int(round(row_data['hr'], 0))}" if not np.isnan(row_data['hr']) else "-"
-                    })
-            st.dataframe(pd.DataFrame(df_table_rows), hide_index=True, width='stretch')
+        if not is_rad_pres:
+            st.markdown("---")
+            
+            # Detailed Grid Table (nur in Diagnostik-Ansicht)
+            with st.expander("🔍 Detaillierter metabolischer Verlauf (Tabelle in 10W-Schritten)"):
+                df_table_rows = []
+                for p in range(0, max_x_plot + 1, 10):
+                    rows = df_sim[df_sim['power'] == p]
+                    if not rows.empty:
+                        row_data = rows.iloc[0]
+                        df_table_rows.append({
+                            'Leistung [W]': p,
+                            'VO2ss [ml/min/kg]': round(row_data['vo2ss'], 1) if not np.isnan(row_data['vo2ss']) else "-",
+                            'VLass [mmol/L/min]': round(row_data['vlass'], 3) if not np.isnan(row_data['vlass']) else "-",
+                            'VLaoxmax [mmol/L/min]': round(row_data['vlaoxmax'], 3) if not np.isnan(row_data['vlaoxmax']) else "-",
+                            'Pyruvatdefizit [mmol/L/min]': round(row_data['pyruvat_def'], 3) if not np.isnan(row_data['pyruvat_def']) else "-",
+                            'KH-Anteil [%]': f"{round(row_data['kh_pct'], 1)}%" if not np.isnan(row_data['kh_pct']) else "-",
+                            'Fett-Anteil [%]': f"{round(row_data['fat_pct'], 1)}%" if not np.isnan(row_data['fat_pct']) else "-",
+                            'kalk. RQ': round(row_data['rq'], 3) if not np.isnan(row_data['rq']) else "-",
+                            'EE gesamt [kcal/h]': int(round(row_data['ee_gesamt'], 0)) if not np.isnan(row_data['ee_gesamt']) else "-",
+                            'EE Fett [kcal/h]': int(round(row_data['ee_fett'], 0)) if not np.isnan(row_data['ee_fett']) else "-",
+                            'KH-Verbrauch [g/h]': round(row_data['ee_kh_g'], 1) if not np.isnan(row_data['ee_kh_g']) else "-",
+                            'HF [bpm]': f"{int(round(row_data['hr'], 0))}" if not np.isnan(row_data['hr']) else "-"
+                        })
+                render_centered_html_table(pd.DataFrame(df_table_rows))
+
+            render_ans_coaching_diagrams(
+                mode="cycling",
+                weight_ist=float(weight),
+                bf_ist=float(body_fat_pct),
+                abs_vo2max_ist=float(abs_vo2max),
+                rel_vo2max_ist=float(rel_vo2max),
+                vlamax_ist=float(vlamax),
+                ans_abs_ist=float(ans_power),
+                ans_rel_ist=float(ans_rel),
+                solve_ans_fn=_solve_ans_rad,
+                default_vo2_pct=float(vo2_change * 100.0) if vo2_change != 0 else 5.0,
+                default_vla_pct=float(vla_change * 100.0) if vla_change != 0 else -10.0,
+                default_bf_delta=-1.5,
+                key_prefix="rad",
+                is_presentation=False,
+            )
 
         # --- RADSPORT PDF DOWNLOAD ---
         st.markdown("---")
@@ -1534,13 +3220,43 @@ elif sportart == "Radsport":
                 pdf_error = traceback.format_exc()
 
         if pdf_bytes is not None:
-            st.download_button(
-                label="📄 PDF Report herunterladen",
-                data=pdf_bytes,
-                file_name=f"HYCYS_Radsportdiagnostik_{athlete_name.replace(' ', '_')}.pdf",
-                mime="application/pdf",
-                type="primary",
-                key="radsport_pdf_download_btn"
+            excel_bytes_rad = None
+            try:
+                excel_bytes_rad = create_hycys_excel_rad(
+                    athlete_name=athlete_name,
+                    birthdate=birthdate,
+                    test_date=test_date,
+                    diagnostik_type=st.session_state.get("diagnostik_type", "Cycling BLUE"),
+                    coach=coach,
+                    kategorie=kategorie,
+                    height=height,
+                    weight=weight,
+                    body_fat_pct=body_fat_pct,
+                    df_sf=st.session_state.get("df_sf"),
+                    df_sprint_lac=st.session_state.get("df_sprint_lac"),
+                    ppo_val=ppo_val,
+                    abs_vo2max=abs_vo2max,
+                    t_alak=t_alak,
+                    t_bel=t_bel,
+                    slope_val=slope_val,
+                    intercept_val=intercept_val,
+                    hfmax_val=hfmax_val,
+                    sprint_times=sprint_times,
+                    sprint_powers=sprint_powers,
+                    sprint_cadences=sprint_cadences,
+                    uploaded_spiro=uploaded_spiro,
+                )
+            except Exception as e_xls_rad:
+                st.warning(f"Hinweis: HYCYS-Excel konnte nicht erzeugt werden ({e_xls_rad}).")
+
+            render_gdrive_upload_section(
+                pdf_bytes=pdf_bytes,
+                diagnostik_type=st.session_state.get("diagnostik_type", "Cycling BLUE"),
+                athlete_name=athlete_name,
+                test_date=test_date,
+                gender_str=st.session_state.get("gender", "männlich"),
+                key_prefix="radsport",
+                excel_bytes=excel_bytes_rad,
             )
         else:
             st.error(f"Fehler bei der PDF-Erstellung: Bitte Eingaben prüfen.")
@@ -1598,18 +3314,28 @@ test_types = [
 # 1. Upload (Spiro file)
 uploaded_file = st.sidebar.file_uploader("Spiro-Datei hochladen (.xlsx oder .csv)", type=["xlsx", "csv"], key="uploaded_file_key")
 
+separate_ramp = st.sidebar.checkbox("Stufe und Rampe getrennt", key="separate_ramp_checkbox")
+uploaded_ramp = None
+if separate_ramp:
+    uploaded_ramp = st.sidebar.file_uploader("Rampendatei (Spiro, 10s Format) hochladen (.xlsx oder .csv)", type=["xlsx", "csv"], key="uploaded_ramp_key")
+
 # 2. Testprotokoll (eingeklappt)
+if "selected_threshold_model" not in st.session_state:
+    st.session_state.selected_threshold_model = "OBLA 4.0 (ANS)"
+
+def _on_sidebar_thresh_change():
+    st.session_state.selected_threshold_model = st.session_state.selected_threshold_model_widget
+
 with st.sidebar.expander("Testprotokoll", expanded=False):
     test_type = st.selectbox("Testprotokoll", options=test_types, key="test_type_lauft_widget")
 
-    selected_model_name = "OBLA 4.0 (ANS)"
-    if test_type == "Neues Protokoll (3min / +1km/h bzw. 0,278m/s)":
-        selected_model_name = st.selectbox(
-            "Auswertungs-Schwelle",
-            options=["OBLA 4.0 (ANS)", "Dmax (Standard)", "Modified Dmax", "LTP2"],
-            index=0,
-            key="selected_threshold_model_widget"
-        )
+    st.session_state.selected_threshold_model_widget = st.session_state.selected_threshold_model
+    selected_model_name = st.selectbox(
+        "Auswertungs-Schwelle (LT2 / ANS)",
+        options=["OBLA 4.0 (ANS)", "LTP2"],
+        key="selected_threshold_model_widget",
+        on_change=_on_sidebar_thresh_change
+    )
     
     # Step parameters (inside the expander)
     start_v = st.number_input("Startgeschwindigkeit (m/s)", value=float(st.session_state.start_v), step=0.1, key="start_v_lauft_widget")
@@ -1834,14 +3560,14 @@ sync_lauftest_input_df()
 with st.sidebar.expander("Stufentest Laktat", expanded=False):
     edited_df = st.data_editor(
         st.session_state.df_lauftest_input,
-        disabled=["Stufe", "v (m/s)", "v (km/h)"],
+        disabled=["Stufe", "v (m/s)", "v (min/km)"],
         hide_index=True,
         use_container_width=True,
         height=320,
         column_config={
             "Stufe": st.column_config.TextColumn("Stufe", width="small"),
             "v (m/s)": st.column_config.NumberColumn("v (m/s)", format="%.2f", width="small"),
-            "v (km/h)": st.column_config.NumberColumn("v (km/h)", format="%.1f", width="small"),
+            "v (min/km)": st.column_config.TextColumn("v (min/km)", width="small"),
             "Laktat": st.column_config.NumberColumn("Laktat", min_value=0.0, max_value=25.0, step=0.01, format="%.2f", width="small"),
             "HF": st.column_config.NumberColumn("HF", min_value=30, max_value=240, step=1, format="%d", width="small")
         },
@@ -1932,19 +3658,32 @@ with st.sidebar.expander("Coaching Potential", expanded=False):
         **Simuliertes Coaching-Potential:**
         * **VO2max:** {st.session_state.get('pot_vo2max', 0.0):.1f} ml/min/kg
         * **VLamax:** {st.session_state.get('pot_vlamax', 0.0):.3f} mmol/L/s
-        * **ANS:** {st.session_state.get('pot_ans_rel', 0.0):.2f} m/s ({round(st.session_state.get('pot_ans_rel', 0.0) * 3.6, 1)} km/h)
-        * **Fatmax:** {st.session_state.get('pot_fatmax', 0.0):.2f} m/s ({round(st.session_state.get('pot_fatmax', 0.0) * 3.6, 1)} km/h)
+        * **ANS:** {st.session_state.get('pot_ans_rel', 0.0):.2f} m/s ({format_pace_mmss(st.session_state.get('pot_ans_rel', 0.0))} min/km)
+        * **Fatmax:** {st.session_state.get('pot_fatmax', 0.0):.2f} m/s ({format_pace_mmss(st.session_state.get('pot_fatmax', 0.0))} min/km)
         """)
 
 st.sidebar.markdown("---")
 start_button = st.sidebar.button("Auswertung starten", type="primary")
+
+def check_lauftest_input(df):
+    if df["Laktat"].isna().any() or df["HF"].isna().any():
+        return False
+    return True
+
 if start_button:
-    st.session_state.df_lauftest_input = edited_df
-    st.session_state.df_sf = edited_sf
-    st.session_state.lauf_auswertung_gestartet = True
+    if check_lauftest_input(edited_df):
+        st.session_state.df_lauftest_input = edited_df
+        st.session_state.df_sf = edited_sf
+        st.session_state.lauf_auswertung_gestartet = True
+    else:
+        st.sidebar.error("Bitte alle Laktat- und HF-Werte ausfüllen, bevor die Auswertung gestartet wird.")
 elif st.session_state.get("lauf_auswertung_gestartet", False):
-    st.session_state.df_lauftest_input = edited_df
-    st.session_state.df_sf = edited_sf
+    if check_lauftest_input(edited_df):
+        st.session_state.df_lauftest_input = edited_df
+        st.session_state.df_sf = edited_sf
+    else:
+        st.session_state.lauf_auswertung_gestartet = False
+        st.sidebar.error("Auswertung gestoppt: Es fehlen Laktat- oder HF-Werte.")
 
 # --- HILFSFUNKTIONEN ---
 
@@ -2024,42 +3763,155 @@ def calculate_vlamax_for_v(v_thresh, rel_vo2max, speed_arr, vo2_steady_abs, vco2
 
 def calculate_laufokonomie_hycys(vo2_abs, vco2_abs, weight, speed_ms):
     """
-    Laufökonomie nach HYCYS Excel-Methodik.
-    Entspricht Spalte Y im 'Report Running' Sheet:
-      Y = (Arbeits-VO2 bei 100% KH) / Geschwindigkeit [m/s] / Gewicht [kg]
-    
-    Formeln aus Excel:
-      - Ruhe-VO2 = 3.5 * weight (B14-Formel)
-      - Arbeits-VO2 = VO2_gesamt - Ruhe-VO2 (G-Spalte)
-      - RQ-Korrekturfaktor (L12): cal_eq = (RQ - 0.7) * 5.094 + 19.6 [kcal/L O2]
-      - VO2_CHO100 = Arbeits-VO2 * cal_eq / 21.1  (AB-Spalte / B19)
-      - Laufökonomie = VO2_CHO100 / speed / weight
+    Einzelwert-Hilfsfunktion (wird nicht mehr direkt für die HYCYS-Methodik verwendet).
+    Berechnet vereinfachte LÖ = VO2ss_rel / v [m/s].
+    Für die exakte HYCYS-Methodik bitte calculate_laufokonomie_hycys_stages() verwenden.
     """
     if weight <= 0 or speed_ms <= 0 or vo2_abs <= 0:
         return None
-    # Ruhe-VO2 [ml/min] (B14 = 3.5 * Gewicht)
-    vo2_rest = 3.5 * weight
-    # Arbeits-VO2 [ml/min] (Spalte G = F - Ruhe)
-    vo2_working = max(0.0, vo2_abs - vo2_rest)
-    if vo2_working <= 0:
-        return None
-    # RQ (Spalte K = VCO2 / VO2)
-    if vco2_abs > 0 and vo2_abs > 0:
-        rq = vco2_abs / vo2_abs
-    else:
-        rq = 0.85  # Standardwert
-    # Kalorisches Äquivalent bei gemessenem RQ [kcal/L O2] (L12-Formel)
-    # L12 = ((K12 - B17) * 0.05094 * 100) + B18  mit B17=0.7, B18=19.6
-    cal_eq = (rq - 0.7) * 5.094 + 19.6
-    # VO2-Äquivalent bei 100% KH-Verbrennung [ml/min] (AB-Spalte)
-    b19 = 21.1  # kcal/L O2 bei RQ=1 (reine KH)
-    vo2_cho100 = vo2_working * cal_eq / b19
-    # Laufökonomie [ml*s/(m*min*kg)] = F44/B7 im Excel
-    return vo2_cho100 / speed_ms / weight
+    vo2_rel = vo2_abs / weight
+    return vo2_rel / speed_ms
+
+
+def calculate_laufokonomie_hycys_stages(speeds_arr, vo2_abs_arr, vco2_abs_arr, weight):
+    """
+    Laufökonomie nach exakter HYCYS Excel-Methodik für alle Stufen.
+
+    Entspricht den Formeln in 'Calculation Physiologie', Spalten AC/AF/AG:
+      1. AC = VO2_CHO100 / speed [dm/s] / 10
+         mit VO2_CHO100 = (VO2 - 3.5*kg) * kal_equiv / 21.1
+         und kal_equiv = (RQ - 0.7) * 5.094 + 19.6
+      2. Lineare Regression (SLOPE/INTERCEPT) zwischen je 2 aufeinanderfolgenden Stufen
+      3. LÖ[i] = (SLOPE * speed_dm_s[i] + INTERCEPT) * 100 / weight
+
+    Gibt eine Liste von LÖ-Werten zurück [ml/min/kg/(m/s)],
+    letzter Wert = None (kein Folge-Stufen-Vergleich möglich).
+    """
+    n = len(speeds_arr)
+    if n < 2 or weight <= 0:
+        return [None] * n
+
+    vo2_rest = 3.5 * weight  # Ruhe-VO2 [ml/min]
+    b19 = 21.1               # kcal/L O2 bei RQ=1
+
+    # AC-Werte berechnen
+    ac_vals = []
+    for vo2, vco2, v in zip(vo2_abs_arr, vco2_abs_arr, speeds_arr):
+        if vo2 <= 0 or v <= 0:
+            ac_vals.append(None)
+            continue
+        vo2_working = max(0.0, vo2 - vo2_rest)
+        if vo2_working <= 0:
+            ac_vals.append(None)
+            continue
+        rq = (vco2 / vo2) if vco2 > 0 else 0.85
+        cal_eq = (rq - 0.7) * 5.094 + 19.6
+        vo2_cho100 = vo2_working * cal_eq / b19
+        # AC = VO2_CHO100 / speed_dm_s / 10  (entspricht Excel-Spalte AC)
+        speed_dm_s = v * 10
+        ac_vals.append(vo2_cho100 / speed_dm_s / 10)
+
+    # Speeds in dm/s
+    speeds_dm_s = [v * 10 for v in speeds_arr]
+
+    # LÖ via SLOPE zwischen je zwei aufeinanderfolgenden Stufen
+    lo_vals = []
+    for i in range(n):
+        if i < n - 1 and ac_vals[i] is not None and ac_vals[i + 1] is not None:
+            x0, x1 = speeds_dm_s[i], speeds_dm_s[i + 1]
+            y0, y1 = ac_vals[i],      ac_vals[i + 1]
+            slope     = (y1 - y0) / (x1 - x0) if (x1 - x0) != 0 else 0
+            intercept = y0 - slope * x0
+            # F = (slope * v_dm_s + intercept) * 100
+            f_val = (slope * speeds_dm_s[i] + intercept) * 100
+            lo_vals.append(f_val / weight)
+        else:
+            # Letzte Stufe: SLOPE mit vorheriger Stufe rückwärts
+            if i > 0 and ac_vals[i - 1] is not None and ac_vals[i] is not None:
+                x0, x1 = speeds_dm_s[i - 1], speeds_dm_s[i]
+                y0, y1 = ac_vals[i - 1],      ac_vals[i]
+                slope     = (y1 - y0) / (x1 - x0) if (x1 - x0) != 0 else 0
+                intercept = y0 - slope * x0
+                f_val = (slope * speeds_dm_s[i] + intercept) * 100
+                lo_vals.append(f_val / weight)
+            else:
+                lo_vals.append(None)
+
+    return lo_vals
+
+
+def build_training_zones_variante_a(v_lt1, hf_lt1, v_lt2, hf_lt2):
+    """
+    Erstellt die 6 Trainingsbereiche nach Variante A (Zone 1-5 mit aufgeteiltem Grundlagenbereich Zone 2 unten/oben):
+      - Zone 1 - Regeneration:             < 85 % von LTP1
+      - Zone 2 - Grundlagenbereich unten:  85 % - 93 % von LTP1
+      - Zone 2 - Grundlagenbereich oben:   93 % - 100 % von LTP1
+      - Zone 3 - Übergang / Tempo:         100 % von LTP1 bis 97 % von LT2 (OBLA 4.0 bzw. LTP2)
+      - Zone 4 - Schwelle:                 97 % - 103 % von LT2 (OBLA 4.0 bzw. LTP2)
+      - Zone 5 - VO2max / HIT:             > 103 % von LT2 (OBLA 4.0 bzw. LTP2)
+    """
+    def _fmt_pace(v):
+        if not isinstance(v, (int, float, np.number)) or v <= 0:
+            return "-"
+        seconds_per_km = 1000.0 / float(v)
+        minutes = int(seconds_per_km // 60)
+        seconds = int(round(seconds_per_km % 60))
+        if seconds == 60:
+            minutes += 1
+            seconds = 0
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _fmt_hr(hr_val):
+        if not isinstance(hr_val, (int, float, np.number)) or hr_val <= 0:
+            return "-"
+        return str(int(round(float(hr_val))))
+
+    if not (isinstance(v_lt2, (int, float, np.number)) and v_lt2 > 0 and isinstance(hf_lt2, (int, float, np.number)) and hf_lt2 > 0):
+        return [
+            ("Zone 1 - Regeneration",            "-", "-", "-", "-", "-", "-"),
+            ("Zone 2 - Grundlagenbereich unten", "-", "-", "-", "-", "-", "-"),
+            ("Zone 2 - Grundlagenbereich oben",  "-", "-", "-", "-", "-", "-"),
+            ("Zone 3 - Übergang / Tempo",        "-", "-", "-", "-", "-", "-"),
+            ("Zone 4 - Schwelle",                "-", "-", "-", "-", "-", "-"),
+            ("Zone 5 - VO2max / HIT",            "-", "-", "-", "-", "-", "-"),
+        ]
+
+    v2 = float(v_lt2)
+    h2 = float(hf_lt2)
+    v1 = float(v_lt1) if (isinstance(v_lt1, (int, float, np.number)) and v_lt1 > 0) else (v2 * 0.79)
+    h1 = float(hf_lt1) if (isinstance(hf_lt1, (int, float, np.number)) and hf_lt1 > 0) else (h2 * 0.85)
+
+    return [
+        ("Zone 1 - Regeneration",
+         "-", _fmt_pace(v1 * 0.85), _fmt_pace(v1 * 0.80),
+         "-", _fmt_hr(h1 * 0.90), _fmt_hr(h1 * 0.85)),
+
+        ("Zone 2 - Grundlagenbereich unten",
+         _fmt_pace(v1 * 0.85), _fmt_pace(v1 * 0.93), _fmt_pace(v1 * 0.89),
+         _fmt_hr(h1 * 0.90), _fmt_hr(h1 * 0.95), _fmt_hr(h1 * 0.93)),
+
+        ("Zone 2 - Grundlagenbereich oben",
+         _fmt_pace(v1 * 0.93), _fmt_pace(v1), _fmt_pace(v1 * 0.97),
+         _fmt_hr(h1 * 0.95), _fmt_hr(h1), _fmt_hr(h1 * 0.98)),
+
+        ("Zone 3 - Übergang / Tempo",
+         _fmt_pace(v1), _fmt_pace(v2 * 0.97), _fmt_pace((v1 + v2 * 0.97) / 2.0),
+         _fmt_hr(h1), _fmt_hr(h2 * 0.97), _fmt_hr((h1 + h2 * 0.97) / 2.0)),
+
+        ("Zone 4 - Schwelle",
+         _fmt_pace(v2 * 0.97), _fmt_pace(v2 * 1.03), _fmt_pace(v2),
+         _fmt_hr(h2 * 0.97), _fmt_hr(h2 * 1.03), _fmt_hr(h2)),
+
+        ("Zone 5 - VO2max / HIT",
+         _fmt_pace(v2 * 1.03), "max", _fmt_pace(v2 * 1.08),
+         _fmt_hr(h2 * 1.03), "max", _fmt_hr(h2 * 1.05)),
+    ]
+
 
 # --- PDF GENERATOR FUNKTION ---
 def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_pct, rel_vo2max, df_res, fig_laktat,
-               coach, sportart, kategorie, height, speed, lactate, hr, vo2_steady_values, vo2_steady_abs, vco2_steady_abs, uploaded_file):
+               coach, sportart, kategorie, height, speed, lactate, hr, vo2_steady_values, vo2_steady_abs, vco2_steady_abs, uploaded_file,
+               v_ltp1=None, hf_ltp1=None):
     pdf = FPDF(unit='pt')
     pdf.set_auto_page_break(auto=False)
 
@@ -2189,7 +4041,8 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
             ex_speeds = [v for v in speed if v > 0]
             
             if len(ex_speeds) >= 2:
-                v_grid = np.arange(2.6, 8.61, 0.01)
+                v_grid_start = min(2.6, float(ex_speeds[0]))
+                v_grid = np.arange(v_grid_start, 8.61, 0.01)
                 ac_grid = []
                 for v in v_grid:
                     if v <= ex_speeds[0]:
@@ -2441,40 +4294,90 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_rect(57.6, 415.0, 458.1, 10.44, fill_color=c_teal)
     draw_text_centered(57.6 + 458.1 / 2.0, 416.1, "Interaktion Laktatauf- & abbau", size=8.2, font_style='B', color=c_white)
     
+    import math
     fig, ax = plt.subplots(figsize=(6, 3.2), dpi=300)
-    v_start = speed[0] if len(speed) > 0 else 2.9
-    v_end = speed[-1] if len(speed) > 0 else 4.5
-    v_arr = np.linspace(v_start, v_end, 100)
-    
-    if uploaded_file is not None and len(vo2_steady_abs) > 0:
-        ax.plot(speed[:len(vo2_steady_abs)], vo2_steady_abs, color='#595a59', linewidth=2.5)
-        ax.set_ylabel('VO2 [ml/min]', color='#595a59', fontsize=7, fontweight='bold')
-        ax.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
-        ax.grid(True, which='both', linestyle='-', linewidth=1.0, color='#d8d8d8')
-        ax.set_axisbelow(True)
-    else:
-        ax.set_ylabel('VO2 [ml/min]', color='#595a59', fontsize=7, fontweight='bold')
-        ax.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
-        ax.grid(True, which='both', linestyle='-', linewidth=1.0, color='#d8d8d8')
-        ax.set_axisbelow(True)
-        
+    v_start = float(speed[0]) if len(speed) > 0 else 2.6
+    v_end = float(speed[-1]) if len(speed) > 0 else 4.2
+    v_plot_end = v_end
+    if v_grid is not None and 'delta_vo2_grid' in locals() and delta_vo2_grid is not None:
+        valid_lac_speeds = v_grid[(delta_vo2_grid > 0) & (v_grid >= v_start) & (v_grid <= v_end)]
+        if len(valid_lac_speeds) >= 2:
+            v_plot_end = float(valid_lac_speeds[-1])
+    v_arr = np.linspace(v_start, v_plot_end, 100)
+
     ax2 = ax.twinx()
-    if v_grid is not None and lac_clear_grid is not None and lac_prod_grid is not None:
-        ax2.plot(v_grid, lac_clear_grid, color='#2cb7b9', linewidth=2.5)
-        ax2.plot(v_grid, lac_prod_grid, color='#cdb663', linewidth=2.5, linestyle='-')
+    bbox_props = dict(boxstyle='square,pad=0.2', facecolor='white', edgecolor='none', alpha=0.9)
+
+    if v_grid is not None and lac_clear_grid is not None and lac_prod_grid is not None and 'vo2_rel_demand_grid' in locals():
+        mask_lac = (v_grid >= v_start - 1e-6) & (v_grid <= v_plot_end + 1e-6) & (delta_vo2_grid > 0)
+        v_lac_plot = v_grid[mask_lac]
+        vo2_abs_plot = vo2_rel_demand_grid[mask_lac] * weight
+        lac_clear_plot = lac_clear_grid[mask_lac]
+        lac_prod_plot = lac_prod_grid[mask_lac]
+
+        ax.plot(v_lac_plot, vo2_abs_plot, color='#595a59', linewidth=2.5)
+        ax2.plot(v_lac_plot, lac_clear_plot, color='#2cb7b9', linewidth=2.5)
+        ax2.plot(v_lac_plot, lac_prod_plot, color='#cdb663', linewidth=2.5, linestyle='-')
+
+        max_vo2_plot = float(np.max(vo2_abs_plot)) if len(vo2_abs_plot) > 0 else 4500.0
+        y1_lac_max = max(5500.0, math.ceil(max_vo2_plot * 1.25 / 500.0) * 500.0)
+        ax.set_ylim(0, y1_lac_max)
+
+        # HYCYS Excel Report Running skaliert die rechte Achse (Laktatkinetik) von 0 bis 5.0 mmol/L/min
+        ans_clear_val = float(np.interp(v_ans, v_lac_plot, lac_clear_plot)) if len(v_lac_plot) > 0 else 2.8
+        y2_lac_max = max(5.0, float(math.ceil(ans_clear_val * 1.75)))
+        ax2.set_ylim(0, y2_lac_max)
+
+        if len(v_lac_plot) >= 2:
+            x_span = v_lac_plot[-1] - v_lac_plot[0]
+            # 1. Label 'Sauerstoffaufnahme - VO2' bei ~28 % der X-Achse direkt über der grauen VO2-Kurve
+            v_lbl_vo2 = v_lac_plot[0] + 0.28 * x_span
+            y_lbl_vo2 = float(np.interp(v_lbl_vo2, v_lac_plot, vo2_abs_plot)) + 0.08 * y1_lac_max
+            ax.text(v_lbl_vo2, min(y_lbl_vo2, 0.92 * y1_lac_max), 'Sauerstoffaufnahme - VO2',
+                    color='#595a59', fontsize=6.5, fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
+
+            # 2. Label 'Laktatabbau' bei ~45 % der X-Achse knapp über der türkisen Laktatabbau-Kurve
+            v_lbl_clr = v_lac_plot[0] + 0.45 * x_span
+            y_clr_at_v = float(np.interp(v_lbl_clr, v_lac_plot, lac_clear_plot))
+            y_prd_at_v = float(np.interp(v_lbl_clr, v_lac_plot, lac_prod_plot))
+            offset_clr = 0.08 * y2_lac_max if y_clr_at_v >= y_prd_at_v else -0.08 * y2_lac_max
+            ax2.text(v_lbl_clr, max(0.08 * y2_lac_max, min(0.88 * y2_lac_max, y_clr_at_v + offset_clr)), 'Laktatabbau',
+                     color='#2cb7b9', fontsize=6.5, fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
+
+            # 3. Label 'Laktatproduktion' im unteren/rechten Bereich an der goldenen Kurve ohne Überlappung
+            target_prod_y = 0.22 * y2_lac_max
+            idx_prd = int(np.argmin(np.abs(lac_prod_plot - target_prod_y)))
+            v_lbl_prd = float(v_lac_plot[idx_prd])
+            if abs(v_lbl_prd - v_lbl_clr) < 0.22 * x_span:
+                v_lbl_prd = v_lac_plot[0] + 0.72 * x_span
+            y_prd_val = float(np.interp(v_lbl_prd, v_lac_plot, lac_prod_plot))
+            y_lbl_prd = max(0.08 * y2_lac_max, min(0.88 * y2_lac_max, y_prd_val - 0.09 * y2_lac_max if y_prd_val > 0.20 * y2_lac_max else y_prd_val + 0.09 * y2_lac_max))
+            ax2.text(v_lbl_prd, y_lbl_prd, 'Laktatproduktion',
+                     color='#cdb663', fontsize=6.5, fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
     else:
+        if uploaded_file is not None and len(vo2_steady_abs) > 0:
+            ax.plot(speed[:len(vo2_steady_abs)], vo2_steady_abs, color='#595a59', linewidth=2.5)
+        ax.set_ylim(0, 5500)
         poly_coeffs = np.polyfit(speed, lactate, 3)
         poly_func = np.poly1d(poly_coeffs)
         ax2.plot(v_arr, poly_func(v_arr), color='#2cb7b9', linewidth=2.5)
-        
-        lac_prod = lactate[0] + (lactate[-1] - lactate[0]) * ((v_arr - v_start)/(v_end - v_start))**3.5
+        lac_prod = lactate[0] + (lactate[-1] - lactate[0]) * ((v_arr - v_start) / max(v_end - v_start, 1e-6)) ** 3.5
         ax2.plot(v_arr, lac_prod, color='#cdb663', linewidth=2.5, linestyle='-')
-    
+        ax2.set_ylim(0, 5.0)
+        ax.text(0.28, 0.62, 'Sauerstoffaufnahme - VO2', color='#595a59', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax.transAxes, bbox=bbox_props, zorder=10)
+        ax2.text(0.48, 0.45, 'Laktatabbau', color='#2cb7b9', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
+        ax2.text(0.72, 0.22, 'Laktatproduktion', color='#cdb663', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
+
+    ax.set_ylabel('VO2 [ml/min]', color='#595a59', fontsize=7, fontweight='bold')
+    ax.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
+    ax.grid(True, which='both', linestyle='-', linewidth=1.0, color='#d8d8d8')
+    ax.set_axisbelow(True)
+
     ax2.set_ylabel('Laktatkinetik [mmol/L/min]', color='#595a59', fontsize=7, fontweight='bold')
     ax2.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
     
     ax.set_xlabel('Geschwindigkeit [m/s]', color='#595a59', fontsize=7, fontweight='bold')
-    ax.set_xlim(v_start, v_end)
+    ax.set_xlim(v_start, v_plot_end)
     ax.tick_params(axis='x', labelcolor='#595a59', labelsize=6, width=1.2)
     
     for s in ax.spines.values():
@@ -2487,11 +4390,6 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     for label in ax.get_xticklabels(): label.set_weight('bold')
     for label in ax.get_yticklabels(): label.set_weight('bold')
     for label in ax2.get_yticklabels(): label.set_weight('bold')
-
-    bbox_props = dict(boxstyle='square,pad=0.2', facecolor='white', edgecolor='none', alpha=1.0)
-    ax.text(0.24, 0.43, 'Sauerstoffaufnahme - VO2', color='#595a59', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax.transAxes, bbox=bbox_props, zorder=10)
-    ax2.text(0.66, 0.81, 'Laktatproduktion', color='#cdb663', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
-    ax2.text(0.76, 0.33, 'Laktatabbau', color='#2cb7b9', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
     
     plt.tight_layout()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_lactate:
@@ -2514,22 +4412,31 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_text_centered(57.6 + 103.5 / 2.0, 160.3, "Geschwindigkeit", size=8.2, font_style='B', color=c_white)
     draw_text_centered(57.6 + 103.5 + 103.5 / 2.0, 160.3, "Laufökonomie", size=8.2, font_style='B', color=c_white)
 
-    # Populate running economy values dynamically
+    # Populate running economy values dynamically (HYCYS-Methodik in ml/kg/km)
     speeds_s3 = []
     eco_vals_s3 = []
     y_coords_s3 = [173.2, 183.8, 197.1, 211.8, 225.1]
     
-    display_steps = min(5, len(speed))
+    # LO berechnen mit exakter HYCYS-Methodik und in ml/kg/km umrechnen (* 1000 / 60)
+    n_pdf = min(5, len(speed))
+    lo_pdf_list = calculate_laufokonomie_hycys_stages(
+        speeds_arr   = list(speed[:n_pdf]),
+        vo2_abs_arr  = list(vo2_steady_abs[:n_pdf]) if len(vo2_steady_abs) >= n_pdf else [0.0]*n_pdf,
+        vco2_abs_arr = list(vco2_steady_abs[:n_pdf]) if len(vco2_steady_abs) >= n_pdf else [0.0]*n_pdf,
+        weight       = weight
+    ) if len(vo2_steady_abs) > 0 else [None]*n_pdf
+
+    display_steps = n_pdf
     for i in range(display_steps):
-        v_ms = speed[i]
-        vo2_r = vo2_steady_values[i] if i < len(vo2_steady_values) else 0.0
-        
-        if vo2_r > 0:
-            re_val = vo2_r / v_ms
-            eco_str = f"{re_val:.1f} ml/min/kg*m/s".replace('.', ',')
+        v_ms  = speed[i]
+        lo_v  = lo_pdf_list[i] if i < len(lo_pdf_list) else None
+        re_v  = (lo_v * 1000.0 / 60.0) if lo_v is not None else None
+
+        if re_v is not None:
+            eco_str = f"{re_v:.1f} ml/kg/km".replace('.', ',')
         else:
             eco_str = "-"
-            
+
         speeds_s3.append(f"{v_ms:.2f} m/s".replace('.', ','))
         eco_vals_s3.append(eco_str)
         
@@ -2538,16 +4445,21 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
         draw_text_centered(57.6 + 103.5 / 2.0, y_coord, speeds_s3[i], size=8.3, font_style='B', color=c_black)
         draw_text_centered(57.6 + 103.5 + 103.5 / 2.0, y_coord, eco_vals_s3[i], size=8.3, font_style='B', color=c_black)
 
-    # Chart 3a: Running Economy plot
+    # Chart 3a: Running Economy plot (HYCYS-Methodik in ml/kg/km)
     fig, ax = plt.subplots(figsize=(3, 1.8), dpi=300)
     valid_re = []
     valid_speeds_v = []
+    lo_chart_list = calculate_laufokonomie_hycys_stages(
+        speeds_arr   = list(speed),
+        vo2_abs_arr  = list(vo2_steady_abs) if len(vo2_steady_abs) == len(speed) else [0.0]*len(speed),
+        vco2_abs_arr = list(vco2_steady_abs) if len(vco2_steady_abs) == len(speed) else [0.0]*len(speed),
+        weight       = weight
+    ) if len(vo2_steady_abs) > 0 else [None]*len(speed)
     for i in range(len(speed)):
         v_ms = speed[i]
-        vo2_r = vo2_steady_values[i] if i < len(vo2_steady_values) else 0.0
-        if vo2_r > 0:
-            re_v = vo2_r / v_ms
-            valid_re.append(re_v)
+        lo_v = lo_chart_list[i] if i < len(lo_chart_list) else None
+        if lo_v is not None:
+            valid_re.append(lo_v * 1000.0 / 60.0)
             valid_speeds_v.append(v_ms)
             
     if len(valid_re) > 0:
@@ -2555,7 +4467,7 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
         ax.bar(valid_speeds_v, valid_re, width=bar_w, color='#2cb7b9', zorder=3)
         ax.set_ylim(min(valid_re)*0.9, max(valid_re)*1.1)
         
-    ax.set_ylabel('RE [ml/min/kg*m/s]', color='#595a59', fontsize=6, fontweight='bold')
+    ax.set_ylabel('RE [ml/kg/km]', color='#595a59', fontsize=6, fontweight='bold')
     ax.set_xlabel('Geschwindigkeit [m/s]', color='#595a59', fontsize=6, fontweight='bold')
     if len(speed) > 0:
         ax.set_xlim(speed[0]*0.95, speed[-1]*1.05)
@@ -2751,39 +4663,48 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_text_centered(316.3 + 207.0 / 4.0, 394.34, fatmax_total_energy_str, size=8.3, font_style='B', color=c_dark_grey)
     draw_text_centered(316.3 + 3 * 207.0 / 4.0, 394.34, fatmax_fat_energy_str, size=8.3, font_style='B', color=c_dark_grey)
 
-    # Energetik chart with dual-Y axis and plotted curves
+    # Türkiser Balken für das zweite Diagramm: "Fett & Kohlenhydrat Stoffwechsel"
+    draw_rect(57.6, 431.0, 465.7, 10.44, fill_color=c_teal)
+    draw_text_centered(57.6 + 465.7 / 2.0, 432.1, "Fett & Kohlenhydrat Stoffwechsel", size=8.2, font_style='B', color=c_white)
+
+    # Energetik chart with dual-Y axis and plotted curves starting directly at the left edge
     fig, ax = plt.subplots(figsize=(6, 3.2), dpi=300)
     ax.set_xlabel('Geschwindigkeit [m/s]', color='#595a59', fontsize=6, fontweight='bold')
     ax.set_ylabel('Energie [kcal/h]', color='#595a59', fontsize=6, fontweight='bold')
     
-    v_start = speed[0]
-    v_end = speed[-1]
-    x_lo = v_start * 0.95
-    x_hi = v_end * 1.05
+    v_start = float(speed[0]) if len(speed) > 0 else 2.6
+    v_end = float(speed[-1]) if len(speed) > 0 else 4.2
+    x_lo = v_start
+    x_hi = v_end
+    if v_grid is not None and 'delta_vo2_grid' in locals() and delta_vo2_grid is not None:
+        valid_ener_speeds = v_grid[(delta_vo2_grid > 0) & (v_grid >= v_start) & (v_grid <= v_end)]
+        if len(valid_ener_speeds) >= 2:
+            x_hi = float(valid_ener_speeds[-1])
     ax.set_xlim(x_lo, x_hi)
     
     ax2 = ax.twinx()
     ax2.set_ylabel('Kohlenhydratverbrauch [g/h]', color='#595a59', fontsize=6, fontweight='bold')
     
     if has_spiro and fatmax_speed is not None:
-        ax.plot(v_grid, ee_kcal_h_grid, color='#595a59', linewidth=2.5)
-        ax.plot(v_grid, ee_fat_kcal_h_grid, color='#2cb7b9', linewidth=2.5)
-        ax2.plot(v_grid, carb_g_h_grid, color='#cdb663', linewidth=2.5, linestyle='-')
-        
-        if fatmax_speed > 0 and x_lo <= fatmax_speed <= x_hi:
-            ax.axvspan(fatmax_speed - 0.1, fatmax_speed + 0.1, color='#2cb7b9', alpha=0.25)
-        
-        # Compute Y-axis limits based on the VISIBLE speed range only
-        import math
-        vis_mask = (v_grid >= x_lo) & (v_grid <= x_hi)
+        vis_mask = (v_grid >= x_lo - 1e-6) & (v_grid <= x_hi + 1e-6)
+        v_vis = v_grid[vis_mask]
         vis_ee = ee_kcal_h_grid[vis_mask]
         vis_fat = ee_fat_kcal_h_grid[vis_mask]
         vis_carb = carb_g_h_grid[vis_mask]
+
+        ax.plot(v_vis, vis_ee, color='#595a59', linewidth=2.5)
+        ax.plot(v_vis, vis_fat, color='#2cb7b9', linewidth=2.5)
+        ax2.plot(v_vis, vis_carb, color='#cdb663', linewidth=2.5, linestyle='-')
         
-        y1_data_max = max(vis_ee.max(), vis_fat.max())
-        y2_data_max = vis_carb.max()
+        if fatmax_speed > 0 and x_lo <= fatmax_speed <= x_hi:
+            ax.axvspan(max(x_lo, fatmax_speed - 0.1), min(x_hi, fatmax_speed + 0.1), color='#2cb7b9', alpha=0.25)
         
-        # Round up to nice tick values with ~10% headroom
+        # Compute Y-axis limits based on the VISIBLE speed range only
+        import math
+        y1_data_max = max(float(vis_ee.max()), float(vis_fat.max())) if len(vis_ee) > 0 else 1500.0
+        y2_data_max = float(vis_carb.max()) if len(vis_carb) > 0 else 350.0
+        
+        # Round up to nice tick values with ~12% headroom
         y1_step = 100 if y1_data_max < 1500 else 200 if y1_data_max < 3000 else 500
         y1_max = math.ceil(y1_data_max * 1.12 / y1_step) * y1_step
         
@@ -2793,45 +4714,62 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
         ax.set_ylim(0, y1_max)
         ax2.set_ylim(0, y2_max)
         
-        # --- Smart label positioning ---
-        # Evaluate curve values at representative x-positions for label placement
-        bbox_props = dict(boxstyle='square,pad=0.2', facecolor='white', edgecolor='none', alpha=1.0)
-        
-        # Fatmax label: place at the fatmax speed if visible
+        # --- Non-overlapping smart label positioning in normalized plot coordinates ---
+        bbox_props = dict(boxstyle='square,pad=0.2', facecolor='white', edgecolor='none', alpha=0.92)
+        placed_boxes = []  # list of (x_norm, y_norm, half_w, half_h)
+
+        def _resolve_non_overlapping_y(x_norm, y_norm_init, half_w=0.14, half_h=0.055):
+            # Try initial position first, then small vertical offsets to guarantee zero overlap
+            candidates = [y_norm_init]
+            for step in [0.07, -0.07, 0.13, -0.13, 0.19, -0.19, 0.25, -0.25]:
+                cand = y_norm_init + step
+                if 0.08 <= cand <= 0.92:
+                    candidates.append(cand)
+            best_y = max(0.08, min(0.92, y_norm_init))
+            for cand in candidates:
+                cand_clamped = max(0.08, min(0.92, cand))
+                collision = False
+                for (bx, by, bw, bh) in placed_boxes:
+                    if abs(x_norm - bx) < (half_w + bw) and abs(cand_clamped - by) < (half_h + bh):
+                        collision = True
+                        break
+                if not collision:
+                    best_y = cand_clamped
+                    break
+            placed_boxes.append((x_norm, best_y, half_w, half_h))
+            return best_y
+
+        # 1. Fatmax badge: near the bottom of the shaded Fatmax band
         if fatmax_speed > 0 and x_lo <= fatmax_speed <= x_hi:
-            fatmax_idx_vis = np.argmin(np.abs(v_grid - fatmax_speed))
-            fatmax_y_pos = ee_fat_kcal_h_grid[fatmax_idx_vis]
-            ax.text(fatmax_speed, fatmax_y_pos * 0.5 if fatmax_y_pos > y1_max * 0.15 else y1_max * 0.08,
+            fm_x_norm = (fatmax_speed - x_lo) / max(x_hi - x_lo, 1e-6)
+            fm_y_norm = _resolve_non_overlapping_y(fm_x_norm, 0.14, half_w=0.07, half_h=0.05)
+            ax.text(fatmax_speed, fm_y_norm * y1_max,
                     "Fatmax", color='white', fontsize=6, fontweight='bold', ha='center', va='center',
                     bbox=dict(boxstyle='square,pad=0.2', facecolor='#2cb7b9', edgecolor='none'), zorder=12)
         
-        # Gesamtenergieverbrauch: place at ~60% of x-range, slightly above the total energy curve
-        label_x_frac = 0.6
-        label_v = x_lo + (x_hi - x_lo) * label_x_frac
-        label_idx = np.argmin(np.abs(v_grid - label_v))
-        ee_at_label = ee_kcal_h_grid[label_idx]
-        # Position label above the total energy curve
-        gesamt_y = min(ee_at_label + y1_max * 0.08, y1_max * 0.95)
-        ax.text(label_v, gesamt_y, 'Gesamtenergieverbrauch', color='#595a59', fontsize=6.5,
-                fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
+        # 2. Gesamtenergieverbrauch: at ~52% of x-range, above the grey curve
+        ges_x_frac = 0.52
+        ges_v = x_lo + (x_hi - x_lo) * ges_x_frac
+        ee_at_ges = float(np.interp(ges_v, v_vis, vis_ee))
+        ges_y_norm = _resolve_non_overlapping_y(ges_x_frac, (ee_at_ges / y1_max) + 0.08, half_w=0.16, half_h=0.055)
+        ax.text(ges_v, ges_y_norm * y1_max, 'Gesamtenergieverbrauch', color='#595a59', fontsize=6.5,
+                fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=11)
         
-        # Verbrauch von Fetten: place at ~35% of x-range, below the fat curve  
-        fat_label_v = x_lo + (x_hi - x_lo) * 0.35
-        fat_label_idx = np.argmin(np.abs(v_grid - fat_label_v))
-        fat_at_label = ee_fat_kcal_h_grid[fat_label_idx]
-        # Position label below the fat curve
-        fat_y = max(fat_at_label - y1_max * 0.08, y1_max * 0.05)
-        ax.text(fat_label_v, fat_y, 'Verbrauch von Fetten', color='#2cb7b9', fontsize=6.5,
-                fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
+        # 3. Verbrauch von Fetten: at ~30% of x-range, below the teal curve (above Fatmax badge)
+        fat_x_frac = 0.30
+        fat_v = x_lo + (x_hi - x_lo) * fat_x_frac
+        fat_at_v = float(np.interp(fat_v, v_vis, vis_fat))
+        fat_y_norm = _resolve_non_overlapping_y(fat_x_frac, max(0.24, (fat_at_v / y1_max) - 0.08), half_w=0.14, half_h=0.055)
+        ax.text(fat_v, fat_y_norm * y1_max, 'Verbrauch von Fetten', color='#2cb7b9', fontsize=6.5,
+                fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=11)
         
-        # Kohlenhydratverbrauch: place at ~75% of x-range, below the carb curve
-        carb_label_v = x_lo + (x_hi - x_lo) * 0.75
-        carb_label_idx = np.argmin(np.abs(v_grid - carb_label_v))
-        carb_at_label = carb_g_h_grid[carb_label_idx]
-        # Position below the carb curve in ax2 coordinates
-        carb_y = max(carb_at_label - y2_max * 0.08, y2_max * 0.05)
-        ax2.text(carb_label_v, carb_y, 'Kohlenhydratverbrauch', color='#cdb663', fontsize=6.5,
-                 fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
+        # 4. Kohlenhydratverbrauch: at ~74% of x-range, below the gold curve (on ax2 scale)
+        carb_x_frac = 0.74
+        carb_v = x_lo + (x_hi - x_lo) * carb_x_frac
+        carb_at_v = float(np.interp(carb_v, v_vis, vis_carb))
+        carb_y_norm = _resolve_non_overlapping_y(carb_x_frac, (carb_at_v / y2_max) - 0.09, half_w=0.15, half_h=0.055)
+        ax2.text(carb_v, carb_y_norm * y2_max, 'Kohlenhydratverbrauch', color='#cdb663', fontsize=6.5,
+                 fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=11)
     else:
         ax.set_ylim(0, 1500)
         ax2.set_ylim(0, 400)
@@ -2866,7 +4804,7 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     radar_labels = [
         'VO2max\n[ml/min/kg]',
         'Fettanteil\n[%]',
-        'Laufökonomie\n[ml/min/kg*m/s]',
+        'Laufökonomie\n[ml/kg/km]',
         'ANS\n[m/s]',
         'Fatmax\n[m/s]',
         'KH-Match\n[m/s]',
@@ -2924,17 +4862,16 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     pot_vlamax = float(st.session_state.get("pot_vlamax", 0.45))
 
     re_val = 210.0
-    valid_re = []
-    for i in range(len(speed)):
-        v_ms = speed[i]
-        vo2_r = vo2_steady_values[i] if i < len(vo2_steady_values) else 0.0
-        if vo2_r > 0:
-            valid_re.append(vo2_r / (v_ms * 3.6) * 60.0)
     if len(valid_re) > 0:
         re_val = np.mean(valid_re)
 
-    v_fatmax = v_ans * 0.78
+    v_fatmax = fatmax_speed if (fatmax_speed is not None and fatmax_speed > 0) else (v_ans * 0.78)
     v_kh_match = v_ans * 0.85
+    if has_spiro and v_grid is not None and 'carb_g_h_grid' in locals():
+        try:
+            v_kh_match = float(v_grid[np.argmin(np.abs(carb_g_h_grid - 45.0))])
+        except Exception:
+            pass
 
     athlete_scores = [
         normalize_ref_running(rel_vo2max,    'VO2max'),
@@ -3089,41 +5026,7 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
         except:
             pass
 
-    if v_ans > 0 and ans_hf > 0:
-        zones_data = [
-            ("regenerativer Dauerlauf (DLreg)",
-             "-", format_pace(v_ans * 0.68), format_pace(v_ans * 0.65),
-             "-", format_hr(ans_hf * 0.77), format_hr(ans_hf * 0.70)),
-            
-            ("extensiver Dauerlauf (DLext)",
-             format_pace(v_ans * 0.68), format_pace(v_ans * 0.79), format_pace(v_ans * 0.77),
-             format_hr(ans_hf * 0.77), format_hr(ans_hf * 0.85), format_hr(ans_hf * 0.80)),
-            
-            ("intensiver  Dauerlauf (DLint)",
-             format_pace(v_ans * 0.79), format_pace(v_ans * 0.93), format_pace(v_ans * 0.86),
-             format_hr(ans_hf * 0.85), format_hr(ans_hf * 0.95), format_hr(ans_hf * 0.91)),
-            
-            ("Tempodauerlauf (DLTempo)",
-             format_pace(v_ans * 0.93), format_pace(v_ans * 1.05), format_pace(v_ans * 0.99),
-             format_hr(ans_hf * 0.95), format_hr(ans_hf * 1.03), format_hr(ans_hf * 0.99)),
-            
-            ("extensives Tempotraining (TText)",
-             format_pace(v_ans * 1.05), format_pace(v_ans * 1.23), format_pace(v_ans * 1.13),
-             format_hr(ans_hf * 1.03), format_hr(ans_hf * 1.05), format_hr(ans_hf * 1.05)),
-            
-            ("intensives Tempotraining (TTint)",
-             format_pace(v_ans * 1.23), "max", format_pace(v_ans * 1.25),
-             format_hr(ans_hf * 1.05), "max", format_hr(ans_hf * 1.06)),
-        ]
-    else:
-        zones_data = [
-            ("regenerativer Dauerlauf (DLreg)", "-", "-", "-", "-", "-", "-"),
-            ("extensiver Dauerlauf (DLext)",     "-", "-", "-", "-", "-", "-"),
-            ("intensiver  Dauerlauf (DLint)",     "-", "-", "-", "-", "-", "-"),
-            ("Tempodauerlauf (DLTempo)",          "-", "-", "-", "-", "-", "-"),
-            ("extensives Tempotraining (TText)",  "-", "-", "-", "-", "-", "-"),
-            ("intensives Tempotraining (TTint)",  "-", "-", "-", "-", "-", "-"),
-        ]
+    zones_data = build_training_zones_variante_a(v_ltp1, hf_ltp1, v_ans, ans_hf)
 
     y_coords_s5 = [536.1, 549.4, 562.7, 576.0, 602.7, 616.0]
     for (zn, p_min, p_max, p_zl, hr_mn, hr_mx, hr_zl), y_coord in zip(zones_data, y_coords_s5):
@@ -3162,9 +5065,16 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
 
 # 3. BERECHNUNG & ANZEIGE
 if st.session_state.get("lauf_auswertung_gestartet", False):
-    raw_speeds = st.session_state.df_lauftest_input["v (m/s)"].values
-    raw_lactate = st.session_state.df_lauftest_input["Laktat"].values
-    raw_hr = st.session_state.df_lauftest_input["HF"].values
+    df_valid = st.session_state.df_lauftest_input.copy()
+    df_valid["v (m/s)"] = pd.to_numeric(df_valid["v (m/s)"], errors='coerce')
+    df_valid["Laktat"] = pd.to_numeric(df_valid["Laktat"], errors='coerce')
+    df_valid["HF"] = pd.to_numeric(df_valid["HF"], errors='coerce')
+    
+    df_valid = df_valid.dropna(subset=["v (m/s)", "Laktat"]).reset_index(drop=True)
+
+    raw_speeds = df_valid["v (m/s)"].values
+    raw_lactate = df_valid["Laktat"].values
+    raw_hr = df_valid["HF"].values
     
     # Exclude Ruhe (first row) for exercise steps calculations
     speed = raw_speeds[1:]
@@ -3216,9 +5126,30 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                 spiro_interval_note = f"({spiro_interval_sec}s-Auflösung)"
 
             if not spiro_df.empty:
-                # VO2max Rolling-Window: 30s rolling average (3 points for 10s, 1 point for 30s)
-                window_pts = max(1, int(30 / spiro_interval_sec))
+                # VO2max Rolling-Window: 40s rolling average (4 points for 10s, 2 points for 30s)
+                # Entspricht der Excel-Auswertungsmethodik (Window=4 @ 10s-Auflösung = 40s)
+                window_pts = max(1, int(40 / spiro_interval_sec))
                 abs_vo2max = spiro_df['VO2'].rolling(window=window_pts, center=True).mean().max()
+                
+                # Wenn Rampe getrennt hochgeladen wurde, VO2max daraus berechnen
+                if separate_ramp and uploaded_ramp is not None:
+                    try:
+                        df_ramp_excel = pd.read_csv(uploaded_ramp, header=None, low_memory=False) if uploaded_ramp.name.endswith('.csv') else pd.read_excel(uploaded_ramp, header=None)
+                        ramp_times_sec = df_ramp_excel.iloc[3:, 9].apply(parse_time_to_seconds)
+                        ramp_vo2_col = pd.to_numeric(df_ramp_excel.iloc[3:, 13], errors='coerce')
+                        ramp_df = pd.DataFrame({'Time': ramp_times_sec, 'VO2': ramp_vo2_col}).dropna(subset=['Time'])
+                        if len(ramp_df) >= 2:
+                            r_t_diffs = ramp_df['Time'].diff().dropna()
+                            ramp_interval_sec = int(round(r_t_diffs.median()))
+                        else:
+                            ramp_interval_sec = 10
+                        # Rampe: ebenfalls 40s Fenster (wie Stufentest)
+                        ramp_window_pts = max(1, int(40 / ramp_interval_sec))
+                        if not ramp_df.empty:
+                            abs_vo2max = ramp_df['VO2'].rolling(window=ramp_window_pts, center=True).mean().max()
+                    except Exception as e:
+                        st.error(f"Fehler beim Auslesen der Rampendatei: {e}")
+
                 rel_vo2max = abs_vo2max / weight if weight > 0 else 0
 
                 stufendauer = st.session_state.get("stufendauer", 5.0)
@@ -3258,18 +5189,9 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
     results = []
 
     # 1. Fits
-    # Fit polynomial on exercise stages for Dmax/ModDmax:
+    # Fit 3rd degree polynomial on exercise stages (excluding baseline, matching ExPhysLab / lactater):
     poly_coeffs_no = np.polyfit(speed, lactate, 3)
     poly_func_no = np.poly1d(poly_coeffs_no)
-    
-    # Fit polynomial on all data (including adjusted baseline) for OBLA and LTP:
-    speed_with_ruhe = raw_speeds.copy()
-    if len(raw_speeds) > 2 and raw_speeds[0] == 0.0:
-        step_size = raw_speeds[2] - raw_speeds[1]
-        speed_with_ruhe[0] = raw_speeds[1] - step_size
-    lactate_with_ruhe = raw_lactate.copy()
-    poly_coeffs_with = np.polyfit(speed_with_ruhe, lactate_with_ruhe, 3)
-    poly_func_with = np.poly1d(poly_coeffs_with)
 
     # 2. OBLA 4.0 (ANS)
     if 4.0 < lactate[0] or 4.0 > lactate[-1]:
@@ -3282,44 +5204,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
     else:
         results.append({'Modell': 'OBLA 4.0 (ANS)', 'v': 'Laktatwerte zu niedrig um OBLA zu kalkulieren', 'Laktat': None})
 
-    # 3. Dmax (Standard)
-    # Solves perpendicular distance to line from first exercise stage speed[0] to last stage speed[-1]
-    c3, c2, c1, _ = poly_coeffs_no
-    m_dmax = (lactate[-1] - lactate[0]) / (speed[-1] - speed[0])
-    d_roots = np.roots([3 * c3, 2 * c2, c1 - m_dmax])
-    valid_d_roots = [r.real for r in d_roots if np.isreal(r) and speed[0] <= r.real <= speed[-1]]
-    if valid_d_roots:
-        v_exact_dmax = max(valid_d_roots)
-        results.append({'Modell': 'Dmax (Standard)', 'v': v_exact_dmax, 'Laktat': poly_func_no(v_exact_dmax)})
-    else:
-        results.append({'Modell': 'Dmax (Standard)', 'v': 'Kalkulation nicht möglich', 'Laktat': None})
-
-    # 4. Modified Dmax
-    # Line starts at point preceding first rise in lactate >= 0.4 mmol/L
-    diffs = lactate[1:] - lactate[:-1]
-    idx_first_rise = None
-    for i, d in enumerate(diffs):
-        if d >= 0.4:
-            idx_first_rise = i
-            break
-            
-    if not ausbelastung:
-        results.append({'Modell': 'Modified Dmax', 'v': 'Aufgrund fehlender Ausbelastung keine Kalkulation der ModDmax möglich', 'Laktat': None})
-    elif idx_first_rise is None:
-        results.append({'Modell': 'Modified Dmax', 'v': 'Keine Laktat-Steigerung >= 0.4 mmol/L gefunden', 'Laktat': None})
-    else:
-        speed_start = speed[idx_first_rise]
-        lac_start = lactate[idx_first_rise]
-        m_mod = (lactate[-1] - lac_start) / (speed[-1] - speed_start)
-        mod_roots = np.roots([3 * c3, 2 * c2, c1 - m_mod])
-        valid_mod_roots = [r.real for r in mod_roots if np.isreal(r) and speed_start <= r.real <= speed[-1]]
-        if valid_mod_roots:
-            v_exact_mod = max(valid_mod_roots)
-            results.append({'Modell': 'Modified Dmax', 'v': v_exact_mod, 'Laktat': poly_func_no(v_exact_mod)})
-        else:
-            results.append({'Modell': 'Modified Dmax', 'v': 'Kalkulation nicht möglich', 'Laktat': None})
-
-    # 5. LTP1 & LTP2
+    # 3. LTP1 & LTP2
     try:
         # Interpolate raw speed and lactate onto 0.1 m/s grid (excluding Ruhe)
         grid_speed = np.arange(speed[0], speed[-1] + 1e-9, 0.1)
@@ -3365,31 +5250,43 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
         res_ltp = opt.minimize(loss_func, x0=best_bps, method='Nelder-Mead')
         v_exact_ltp1, v_exact_ltp2 = res_ltp.x[0], res_ltp.x[1]
         
-        # Associated lactates from polynomial with baseline
-        lac_ltp1 = poly_func_with(v_exact_ltp1)
-        lac_ltp2 = poly_func_with(v_exact_ltp2)
+        # Associated lactates from polynomial on exercise stages (matching ExPhysLab retrieve_lactate: round to 1 decimal)
+        lac_ltp1 = round(float(poly_func_no(v_exact_ltp1)), 1)
+        lac_ltp2 = round(float(poly_func_no(v_exact_ltp2)), 1)
         
-        results.append({'Modell': 'LTP1', 'v': v_exact_ltp1, 'Laktat': lac_ltp1})
+        v_ltp1_val = float(v_exact_ltp1)
+        lac_ltp1_val = float(lac_ltp1)
+        hr_mask_ltp1 = (speed > 0) & (hr > 0) & (~np.isnan(speed)) & (~np.isnan(hr))
+        if hr_mask_ltp1.sum() >= 2:
+            hr_slope_ltp1, hr_intercept_ltp1 = np.polyfit(speed[hr_mask_ltp1], hr[hr_mask_ltp1], 1)
+            hf_ltp1_val = int(round(hr_slope_ltp1 * v_ltp1_val + hr_intercept_ltp1, 0))
+        else:
+            hf_ltp1_val = int(round(np.interp(v_ltp1_val, speed, hr), 0))
+        
+        # LTP1 wird immer im Hintergrund kalkuliert (für Trainingsbereiche & Kurve),
+        # in die Schwellen & VLamax Matrix kommen jedoch nur OBLA 4.0 (ANS) und LTP2
         results.append({'Modell': 'LTP2', 'v': v_exact_ltp2, 'Laktat': lac_ltp2})
     except Exception as e:
-        pass
+        v_ltp1_val = None
+        lac_ltp1_val = None
+        hf_ltp1_val = None
 
 
-    # Ergebnisanzeige Matrix aufbauen mit Error-Handling
+    # Ergebnisanzeige Matrix aufbauen mit Error-Handling (nur OBLA 4.0 und LTP2)
     df_res_list = []
     for res in results:
         row = {'Modell': res['Modell'], 'v': res['v']}
         
         if isinstance(res['v'], str):
             row['m/s'] = res['v']
-            row['km/h'] = ""
+            row['min/km'] = ""
             row['Laktat'] = ""
             row['HF'] = ""
             row['VLamax [mmol/l/s]'] = ""
         else:
             row['m/s'] = round(res['v'], 2)
-            row['km/h'] = round(res['v'] * 3.6, 1)
-            row['Laktat'] = round(res['Laktat'], 2)
+            row['min/km'] = format_pace_mmss(res['v'])
+            row['Laktat'] = round(res['Laktat'], 1)
             
             # Linear model for HF instead of interp
             hr_mask = (speed > 0) & (hr > 0) & (~np.isnan(speed)) & (~np.isnan(hr))
@@ -3409,10 +5306,8 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
 
     df_res = pd.DataFrame(df_res_list)
     
-    # 1. Determine active threshold model name
-    selected_model_name = "OBLA 4.0 (ANS)"
-    if "Neues Protokoll" in test_type:
-        selected_model_name = st.session_state.get("selected_threshold_model_widget", "OBLA 4.0 (ANS)")
+    # 1. Determine active threshold model name (always selectable between OBLA 4.0 (ANS) and LTP2)
+    selected_model_name = st.session_state.get("selected_threshold_model", "OBLA 4.0 (ANS)")
         
     # 2. Extract v_ans and vla_val for downstream calculations
     v_ans = 3.5
@@ -3448,57 +5343,130 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
             idx = selected_idx[0]
             df_res = pd.concat([df_res.iloc[[idx]], df_res.drop(idx)]).reset_index(drop=True)
 
-    # Header-Metriken & Körperfett-Tacho
-    st.markdown(f"""
-        <div style="font-size: 16px; line-height: 1.5; margin-bottom: 20px;">
-            <b>Athlet:</b> {athlete_name}<br>
-            <b>Protokoll:</b> {test_type}<br>
-            <b>Test-Datum:</b> {test_date}
-        </div>
-        """, unsafe_allow_html=True)
-        
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Gewicht", f"{weight} kg")
-    
-    with m3:
-        st.metric("VO2max (rel)", f"{rel_vo2max:.1f} ml/min/kg")
-        st.metric("VO2max (abs.)", f"{int(abs_vo2max)} ml/min")
-        st.metric("VLamax", f"{vla_display}")
-        if spiro_interval_note:
-            st.caption(f"⚠️ {spiro_interval_note}")
-            
-    with m4:
-        st.metric("ANS Pace", f"{ans_pace_str} min/km")
-        st.metric("HF @ ANS", f"{hf_ans_val} bpm")
-        
-        v_fatmax = v_ans * 0.78
-        if v_fatmax > 0:
-            p_f_s = 1000.0 / v_fatmax
-            fatmax_pace_str = f"{int(p_f_s // 60)}:{int(p_f_s % 60):02d}"
+    # Ansichts-Umschalter: Ansicht 2 (Diagnostik) <-> Ansicht 3 (Präsentations-Modus)
+    if "lauf_view_mode" not in st.session_state:
+        st.session_state.lauf_view_mode = "🛠️ Diagnostik & Feineinstellung"
+
+    col_vm_l1, col_vm_l2 = st.columns([2.2, 1.0])
+    with col_vm_l1:
+        lauf_view_sel = st.radio(
+            "Aktive Ansicht:",
+            options=["🛠️ Diagnostik & Feineinstellung", "🖥️ Präsentations-Modus (Athletengespräch)"],
+            index=0 if st.session_state.lauf_view_mode == "🛠️ Diagnostik & Feineinstellung" else 1,
+            horizontal=True,
+            key="lauf_view_mode_radio",
+        )
+        st.session_state.lauf_view_mode = lauf_view_sel
+    with col_vm_l2:
+        if st.session_state.lauf_view_mode == "🛠️ Diagnostik & Feineinstellung":
+            if st.button("🖥️ In den Präsentations-Modus wechseln", type="primary", use_container_width=True, key="btn_to_pres_lauf_top"):
+                st.session_state.lauf_view_mode = "🖥️ Präsentations-Modus (Athletengespräch)"
+                st.rerun()
         else:
-            fatmax_pace_str = "-"
-        st.metric("Geschw. @ Fatmax", f"{fatmax_pace_str} min/km")
-    
-    with m2:
-        fig_bf = go.Figure(go.Indicator(
-            mode = "gauge+number",
-            value = max(0, body_fat_pct),
-            number = {'suffix': "%", 'valueformat': ".1f", 'font': {'color': '#00a1e0', 'size': 30}},
-            title = {'text': "Körperfett", 'font': {'size': 14}},
-            gauge = {
-                'axis': {'range': [0, 30], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                'bar': {'color': "#00a1e0"},
-                'bgcolor': "white",
-                'borderwidth': 2,
-                'bordercolor': "gray",
-                'steps': [
-                    {'range': [0, 10], 'color': "rgba(0, 161, 224, 0.1)"},
-                    {'range': [10, 20], 'color': "rgba(0, 161, 224, 0.3)"},
-                    {'range': [20, 30], 'color': "rgba(0, 161, 224, 0.5)"}],
-            }
-        ))
-        fig_bf.update_layout(height=150, margin=dict(l=10, r=10, t=30, b=10))
-        st.plotly_chart(fig_bf, width='stretch')
+            if st.button("🛠️ Zurück zur Diagnostik-Ansicht", use_container_width=True, key="btn_to_diag_lauf_top"):
+                st.session_state.lauf_view_mode = "🛠️ Diagnostik & Feineinstellung"
+                st.rerun()
+
+    is_lauf_pres = (st.session_state.lauf_view_mode == "🖥️ Präsentations-Modus (Athletengespräch)")
+
+    # Header-Metriken & Körperfett-Tacho
+    if is_lauf_pres:
+        st.markdown(f"""
+            <div style="font-size: 16px; line-height: 1.5; margin-bottom: 16px; padding: 12px 16px; border-left: 5px solid #2cb7b9; background-color: #f8fafa; border-radius: 4px;">
+                <b>Athlet:</b> {athlete_name} &nbsp;|&nbsp; <b>Test-Datum:</b> {test_date}
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+            <div style="font-size: 16px; line-height: 1.5; margin-bottom: 16px; padding: 12px 16px; border-left: 5px solid #2cb7b9; background-color: #f8fafa; border-radius: 4px;">
+                <b>Athlet:</b> {athlete_name} &nbsp;|&nbsp; <b>Protokoll:</b> {test_type} &nbsp;|&nbsp; <b>Test-Datum:</b> {test_date} &nbsp;|&nbsp; <b>Kategorie:</b> {kategorie} &nbsp;|&nbsp; <b>Coach:</b> {coach}
+            </div>
+            """, unsafe_allow_html=True)
+        
+    v_fatmax = v_ans * 0.78
+    has_spiro_for_fatmax = (uploaded_file is not None) and (len(vo2_steady_abs) > 0)
+    if has_spiro_for_fatmax:
+        try:
+            vo2_rest_fm = 3.5 * weight
+            ac_stages_fm = []
+            for v_s, vo2_s, vco2_s in zip(speed, vo2_steady_abs, vco2_steady_abs):
+                if v_s <= 0 or vo2_s <= 0:
+                    ac_stages_fm.append(0.0)
+                    continue
+                net_vo2_s = max(0.0, vo2_s - vo2_rest_fm)
+                rq_s = vco2_s / vo2_s if vco2_s > 0 else 0.85
+                kal_equiv_s = (rq_s - 0.7) * 5.094 + 19.6
+                ee_kJ_min_s = (net_vo2_s / 1000.0) * kal_equiv_s
+                vo2_100kh_s = ee_kJ_min_s / 21.1 * 1000.0
+                ac_stages_fm.append(vo2_100kh_s / (v_s * 100.0))
+            ex_speeds_fm = [v_s for v_s in speed if v_s > 0]
+            if len(ex_speeds_fm) >= 2:
+                v_grid_fm = np.arange(2.6, 8.61, 0.01)
+                ac_grid_fm = []
+                for v_g in v_grid_fm:
+                    if v_g <= ex_speeds_fm[0]:
+                        m_fm = (ac_stages_fm[1] - ac_stages_fm[0]) / (ex_speeds_fm[1] - ex_speeds_fm[0])
+                        c_fm = ac_stages_fm[0] - m_fm * ex_speeds_fm[0]
+                        ac_g = m_fm * v_g + c_fm
+                    elif v_g >= ex_speeds_fm[-1]:
+                        m_fm = (ac_stages_fm[-1] - ac_stages_fm[-2]) / (ex_speeds_fm[-1] - ex_speeds_fm[-2])
+                        c_fm = ac_stages_fm[-1] - m_fm * ex_speeds_fm[-1]
+                        ac_g = m_fm * v_g + c_fm
+                    else:
+                        ac_g = ac_stages_fm[-1]
+                        for idx_fm in range(len(ex_speeds_fm) - 1):
+                            if ex_speeds_fm[idx_fm] <= v_g < ex_speeds_fm[idx_fm + 1]:
+                                m_fm = (ac_stages_fm[idx_fm + 1] - ac_stages_fm[idx_fm]) / (ex_speeds_fm[idx_fm + 1] - ex_speeds_fm[idx_fm])
+                                c_fm = ac_stages_fm[idx_fm] - m_fm * ex_speeds_fm[idx_fm]
+                                ac_g = m_fm * v_g + c_fm
+                                break
+                    ac_grid_fm.append(ac_g)
+                ac_grid_fm = np.array(ac_grid_fm)
+                vo2_rel_demand_fm = (ac_grid_fm * v_grid_fm * 100.0) / weight + 1.0
+                delta_vo2_fm = rel_vo2max - vo2_rel_demand_fm
+                lac_clear_fm = (0.02049 * vo2_rel_demand_fm) / 0.4
+                net_clear_fm = np.full_like(v_grid_fm, -9999.0)
+                for idx_fm, (vo2_r_g, d_vo2_g) in enumerate(zip(vo2_rel_demand_fm, delta_vo2_fm)):
+                    if d_vo2_g > 0 and vo2_r_g > 0:
+                        adp_g = np.sqrt((0.0631 * vo2_r_g) / d_vo2_g)
+                        pfk_g = 1.0 + (1.331 / (adp_g ** 3))
+                        vla_min_g = vla_val * 60.0 / pfk_g
+                        net_clear_fm[idx_fm] = lac_clear_fm[idx_fm] - vla_min_g
+                v_fatmax = float(v_grid_fm[int(np.argmax(net_clear_fm))])
+        except Exception:
+            pass
+    fatmax_pace_str = format_pace_mmss(v_fatmax) if v_fatmax > 0 else "-"
+    ltp1_pace_str = format_pace_mmss(v_ltp1_val) if (v_ltp1_val is not None and v_ltp1_val > 0) else "-"
+    hf_ltp1_str = f"{hf_ltp1_val} bpm" if hf_ltp1_val is not None else "-"
+
+    lac_ans_val = None
+    if not df_res.empty and "Laktat" in df_res.columns:
+        raw_lac_ans = df_res.iloc[0]["Laktat"]
+        if isinstance(raw_lac_ans, (int, float, np.number)) and pd.notna(raw_lac_ans):
+            lac_ans_val = float(raw_lac_ans)
+
+    ans_sub_lac_str = f"{lac_ans_val:.1f}".replace(".", ",") + " mmol/l Laktat" if lac_ans_val is not None else ""
+    ltp1_sub_lac_str = f"{lac_ltp1_val:.1f}".replace(".", ",") + " mmol/l Laktat" if lac_ltp1_val is not None else ""
+
+    render_hycys_top_basisdaten(
+        weight=float(weight),
+        body_fat_pct=float(body_fat_pct),
+        rel_vo2max=float(rel_vo2max),
+        abs_vo2max=float(abs_vo2max),
+        vlamax_str=str(vla_display).replace(".", ","),
+        ans_label=f"ANS ({selected_model_name})",
+        ans_main_str=f"{ans_pace_str} min/km",
+        ans_sub_str=ans_sub_lac_str,
+        ans_hr_str=f"{hf_ans_val} bpm",
+        ltp1_label="LTP1",
+        ltp1_main_str=f"{ltp1_pace_str} min/km",
+        ltp1_sub_str=ltp1_sub_lac_str,
+        ltp1_hr_str=hf_ltp1_str,
+    )
+    if not is_lauf_pres:
+        st.caption(f"Kalkulierte Pace @ Fatmax: **{fatmax_pace_str} min/km**")
+    if spiro_interval_note:
+        st.caption(f"{spiro_interval_note}")
 
     # 4. Coaching Potential Override Simulation
     def parse_sel_pct(sel_str):
@@ -3534,7 +5502,8 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
 
             ex_speeds = [v for v in speed if v > 0]
             if len(ex_speeds) >= 2:
-                v_grid = np.arange(2.6, 8.61, 0.01)
+                v_grid_start = min(2.6, float(ex_speeds[0]))
+                v_grid = np.arange(v_grid_start, 8.61, 0.01)
                 ac_grid = []
                 for v in v_grid:
                     if v <= ex_speeds[0]:
@@ -3624,53 +5593,459 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
     poly_func = poly_func_no
     fig_laktat = None
 
+    def _solve_mader_v_lauf(rel_vo2_in, vla_in):
+        if has_spiro and 'ac_grid' in locals() and 'v_grid' in locals() and len(v_grid) > 10:
+            vo2_rel_dem = (ac_grid * v_grid * 100.0) / weight + 1.0
+            d_vo2 = rel_vo2_in - vo2_rel_dem
+            lac_cl = (0.02049 * vo2_rel_dem) / 0.4
+            net_cl = np.full_like(v_grid, -9999.0)
+            for idx_m, (vr_m, dv_m) in enumerate(zip(vo2_rel_dem, d_vo2)):
+                if dv_m > 0 and vr_m > 0:
+                    adp_m = np.sqrt((0.0631 * vr_m) / dv_m)
+                    pfk_m = 1.0 + (1.331 / (adp_m ** 3))
+                    vla_m = (vla_in * 60.0) / pfk_m
+                    net_cl[idx_m] = lac_cl[idx_m] - vla_m
+            ans_i = None
+            for idx_m in range(len(v_grid)):
+                if net_cl[idx_m] < 0 and idx_m > 0 and net_cl[idx_m - 1] >= 0:
+                    ans_i = idx_m - 1
+                    break
+            if ans_i is None:
+                ans_i = int(np.argmin(np.abs(net_cl)))
+            return float(v_grid[ans_i])
+        else:
+            vo2_ratio = (rel_vo2_in / rel_vo2max) if rel_vo2max > 0 else 1.0
+            vla_diff = (vla_val - vla_in) if vla_val > 0 else 0.0
+            return float(v_ans * (vo2_ratio ** 0.85) * (1.0 + 0.28 * vla_diff))
+
+    _base_mader_v = _solve_mader_v_lauf(float(rel_vo2max), float(vla_val))
+    _scale_to_vans = (float(v_ans) / _base_mader_v) if _base_mader_v > 0 else 1.0
+
+    def _solve_ans_lauf(vo2_abs_in, vla_in, w_in):
+        rel_vo2_motor_only = (vo2_abs_in / weight) if weight > 0 else rel_vo2max
+        v_abs_res = _solve_mader_v_lauf(rel_vo2_motor_only, vla_in) * _scale_to_vans
+        rel_vo2_with_weight = (vo2_abs_in / w_in) if w_in > 0 else rel_vo2_motor_only
+        v_rel_res = _solve_mader_v_lauf(rel_vo2_with_weight, vla_in) * _scale_to_vans
+        return float(v_abs_res), float(v_rel_res)
+
+    # SCHWELLEN (direkt unter den Basisdaten, erst danach kommt die Live-Simulation mit dem Wasserfall-Diagramm)
     if not df_res.empty:
-        c1, c2 = st.columns([1, 1])
+        st.markdown("---")
+        c1, c2 = st.columns([1.0, 1.15])
         with c1:
-            st.subheader("Schwellen & VLamax Matrix")
-            # Style the active threshold row (index 0) with a light gray background and bold text
-            styled_df = df_res[['Modell', 'm/s', 'km/h', 'Laktat', 'HF', 'VLamax [mmol/l/s]']]
+            st.subheader("Schwellen")
+            def _on_main_thresh_change():
+                st.session_state.selected_threshold_model = st.session_state.selected_threshold_model_main
+
+            if not is_lauf_pres:
+                st.session_state.selected_threshold_model_main = st.session_state.get("selected_threshold_model", "OBLA 4.0 (ANS)")
+                st.radio(
+                    "Aktive Schwelle (LT2 / ANS) für Auswertung & Trainingsbereiche:",
+                    options=["OBLA 4.0 (ANS)", "LTP2"],
+                    horizontal=True,
+                    key="selected_threshold_model_main",
+                    on_change=_on_main_thresh_change
+                )
             
             def fmt_2_decimals(x):
-                if pd.isna(x): return ""
+                if pd.isna(x) or x == "": return "-"
                 if isinstance(x, (int, float, np.number)): return f"{x:.2f}".replace('.', ',')
                 try: return f"{float(x):.2f}".replace('.', ',')
                 except ValueError: return str(x)
 
-            def make_row_gray_bold(row):
-                if row.name == 0:
-                    return ['background-color: #f0f2f6; font-weight: bold; color: #1a1a1a;'] * len(row)
-                return [''] * len(row)
-                
-            styled_table = styled_df.style.format({
-                'm/s': fmt_2_decimals,
-                'km/h': fmt_2_decimals,
-                'Laktat': fmt_2_decimals,
-                'HF': fmt_2_decimals,
-                'VLamax [mmol/l/s]': fmt_2_decimals
-            }).apply(make_row_gray_bold, axis=1)
+            def fmt_1_decimal(x):
+                if pd.isna(x) or x == "": return "-"
+                if isinstance(x, (int, float, np.number)): return f"{x:.1f}".replace('.', ',')
+                try: return f"{float(x):.1f}".replace('.', ',')
+                except ValueError: return str(x)
 
-            st.dataframe(styled_table, hide_index=True, width='stretch')
+            def fmt_int(x):
+                if pd.isna(x) or x == "": return "-"
+                if isinstance(x, (int, float, np.number)): return f"{int(round(float(x)))}"
+                try: return f"{int(round(float(x)))}"
+                except ValueError: return str(x)
+
+            def fmt_kmh(ms_val):
+                if pd.isna(ms_val) or ms_val == "":
+                    return "-"
+                try:
+                    return f"{float(ms_val) * 3.6:.1f}".replace(".", ",")
+                except (ValueError, TypeError):
+                    return str(ms_val)
+
+            df_for_schwellen_ui = df_res.iloc[[0]] if is_lauf_pres else df_res
+            schwellen_rows_fmt = []
+            for _, r_s in df_for_schwellen_ui.iterrows():
+                row_s_dict = {
+                    "Schwelle": r_s["Modell"],
+                    "km/h": fmt_kmh(r_s["v"]),
+                    "min/km": str(r_s["min/km"]),
+                    "Laktat": fmt_1_decimal(r_s["Laktat"]),
+                    "HF": fmt_int(r_s["HF"]),
+                }
+                if not is_lauf_pres:
+                    row_s_dict["VLamax [mmol/l/s]"] = fmt_2_decimals(r_s["VLamax [mmol/l/s]"])
+                schwellen_rows_fmt.append(row_s_dict)
+            df_schwellen_fmt = pd.DataFrame(schwellen_rows_fmt)
+            render_centered_html_table(df_schwellen_fmt, highlight_first_row=(not is_lauf_pres))
+
+            if v_ltp1_val is not None:
+                st.markdown("<div style='margin-top: 12px; margin-bottom: 4px; font-weight: 700; font-size: 13px; color: #1a1a1a;'>Aerobe Schwelle (LTP1)</div>", unsafe_allow_html=True)
+                df_ltp1_only = pd.DataFrame([{
+                    "Schwelle": "LTP1",
+                    "km/h": fmt_kmh(v_ltp1_val),
+                    "min/km": format_pace_mmss(v_ltp1_val),
+                    "Laktat": fmt_1_decimal(lac_ltp1_val),
+                    "HF": fmt_int(hf_ltp1_val),
+                }])
+                render_centered_html_table(df_ltp1_only, highlight_first_row=False)
+
         with c2:
+            # 1. Im Hintergrund Matplotlib-Graph für den PDF-Export erzeugen (immer mit LTP1, LTP2 und OBLA 4.0)
             fig, ax = plt.subplots(figsize=(8, 4))
             v_smooth = np.linspace(v_start, v_end, 200)
-            ax.plot(speed, lactate, 'ko', label='Messwerte')
-            ax.plot(v_smooth, poly_func(v_smooth), color='#00a1e0', label='Laktatkurve')
-            
+            ax.plot(v_smooth, poly_func(v_smooth), color='#00a1e0', linewidth=2.0, label='Laktatkurve', zorder=2)
+            ax.plot(
+                speed,
+                lactate,
+                linestyle='None',
+                marker='x',
+                color='#2cb7b9',
+                markersize=6.5,
+                markeredgewidth=1.8,
+                zorder=5,
+                label='Messwerte',
+            )
+            for xv_pt, ylac_pt in zip(speed, lactate):
+                ax.annotate(
+                    f"{ylac_pt:.2f}".replace(".", ","),
+                    (xv_pt, ylac_pt),
+                    textcoords="offset points",
+                    xytext=(0, 6),
+                    ha="center",
+                    va="bottom",
+                    fontsize=7.5,
+                    color="#1a1a1a",
+                    fontweight="bold",
+                    bbox=dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="none", alpha=0.75),
+                    zorder=6,
+                )
+            if v_ltp1_val is not None and lac_ltp1_val is not None:
+                ax.plot(v_ltp1_val, lac_ltp1_val, 'X', color='#cdb663', markersize=8.5, zorder=6, label='LTP1')
             for _, r in df_res.iterrows():
-                if isinstance(r['v'], (int, float, np.number)):
-                    ax.plot(r['v'], r['Laktat'], 'X', markersize=8, label=r['Modell'])
-                    
+                if isinstance(r['v'], (int, float, np.number)) and pd.notna(r['v']) and pd.notna(r['Laktat']):
+                    m_col = '#1a1a1a' if 'OBLA' in str(r['Modell']) else '#595a59'
+                    ax.plot(float(r['v']), float(r['Laktat']), 'X', color=m_col, markersize=8.5, zorder=6, label=str(r['Modell']))
+            max_lac_plot = max(list(lactate) + [float(poly_func(v_end))]) if len(lactate) > 0 else 10.0
+            ax.set_ylim(bottom=0.0, top=max_lac_plot * 1.16)
             ax.set_xlabel("Geschwindigkeit (m/s)")
             ax.set_ylabel("Laktat (mmol/L)")
             ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
-            st.pyplot(fig)
-            fig_laktat = fig # Graph speichern für das PDF
+            fig_laktat = fig
+            plt.close(fig)
 
-    # LAUFÖKONOMIE SECTION
+            # 2. In der App-Ansicht (Präsentation & Diagnostik) im modernen Plotly-Format (immer mit LTP1, LTP2 und OBLA 4.0)
+            fig_lak_ui = go.Figure()
+            fig_lak_ui.add_trace(
+                go.Scatter(
+                    x=v_smooth,
+                    y=poly_func(v_smooth),
+                    mode="lines",
+                    line=dict(color="#00a1e0", width=2.8),
+                    name="Laktatkurve",
+                )
+            )
+            fig_lak_ui.add_trace(
+                go.Scatter(
+                    x=speed,
+                    y=lactate,
+                    mode="markers+text",
+                    marker=dict(symbol="x", size=9, color="#2cb7b9", line=dict(width=1.5, color="#2cb7b9")),
+                    text=[f"{yl:.2f}".replace(".", ",") for yl in lactate],
+                    textposition="top center",
+                    textfont=dict(size=10, color="#1a1a1a", family="Arial"),
+                    name="Messwerte",
+                )
+            )
+            if v_ltp1_val is not None and lac_ltp1_val is not None:
+                fig_lak_ui.add_trace(
+                    go.Scatter(
+                        x=[v_ltp1_val],
+                        y=[lac_ltp1_val],
+                        mode="markers",
+                        marker=dict(symbol="x", size=11, color="#cdb663", line=dict(width=2, color="#9e8836")),
+                        name=f"LTP1 ({format_pace_mmss(v_ltp1_val)} min/km)",
+                    )
+                )
+            for _, r in df_res.iterrows():
+                if isinstance(r["v"], (int, float, np.number)) and pd.notna(r["v"]) and pd.notna(r["Laktat"]):
+                    is_obla = "OBLA" in str(r["Modell"])
+                    m_color = "#1a1a1a" if is_obla else "#595a59"
+                    fig_lak_ui.add_trace(
+                        go.Scatter(
+                            x=[float(r["v"])],
+                            y=[float(r["Laktat"])],
+                            mode="markers",
+                            marker=dict(symbol="x", size=11, color=m_color, line=dict(width=2, color=m_color)),
+                            name=f"{r['Modell']} ({format_pace_mmss(float(r['v']))} min/km)",
+                        )
+                    )
+            fig_lak_ui.update_layout(
+                xaxis=dict(title="Geschwindigkeit [m/s]", gridcolor="#e6e6e6"),
+                yaxis=dict(
+                    title="Laktat [mmol/l]",
+                    range=[0.0, max_lac_plot * 1.18],
+                    gridcolor="#e6e6e6",
+                ),
+                legend=dict(
+                    orientation="h",
+                    x=0.5,
+                    xanchor="center",
+                    y=1.12,
+                    bgcolor="rgba(255,255,255,0.85)",
+                    font=dict(size=11),
+                ),
+                height=340,
+                margin=dict(l=50, r=25, t=45, b=45),
+                plot_bgcolor="#f9f9f9",
+            )
+            st.plotly_chart(fig_lak_ui, use_container_width=True)
+
+    # Im Präsentations-Modus kommt die Live-Simulation (inkl. Wasserfall-Diagramm) nach den Schwellen
+    pot_sim_dict_lauf = None
+    if is_lauf_pres:
+        pot_sim_dict_lauf = render_ans_coaching_diagrams(
+            mode="running",
+            weight_ist=float(weight),
+            bf_ist=float(body_fat_pct),
+            abs_vo2max_ist=float(abs_vo2max),
+            rel_vo2max_ist=float(rel_vo2max),
+            vlamax_ist=float(vla_val if vla_val > 0 else 0.45),
+            ans_abs_ist=float(v_ans),
+            ans_rel_ist=float(v_ans),
+            solve_ans_fn=_solve_ans_lauf,
+            default_vo2_pct=float(vo2_change * 100.0) if vo2_change != 0 else 5.0,
+            default_vla_pct=float(vla_change * 100.0) if vla_change != 0 else -10.0,
+            default_bf_delta=-1.5,
+            key_prefix="lauf",
+            is_presentation=True,
+        )
+
+    # FETT & KOHLENHYDRAT STOFFWECHSEL (wie im PDF, mit interaktivem Mouseover für g/h KH, g/h Fett und kcal/h)
+    try:
+        st.markdown("---")
+        st.subheader("Fett & Kohlenhydrat Stoffwechsel")
+
+        v_lo_ener = float(speed[0]) if len(speed) > 0 else 2.6
+        v_hi_ener = float(speed[-1]) if len(speed) > 0 else 4.5
+        v_grid_ener = np.arange(min(2.6, v_lo_ener), max(6.5, v_hi_ener + 0.5), 0.02)
+
+        if has_spiro and 'ac_stages' in locals() and len(ac_stages) >= 2:
+            ex_sp_ener = [v for v in speed if v > 0]
+            ac_grid_ener = []
+            for vg in v_grid_ener:
+                if vg <= ex_sp_ener[0]:
+                    m_e = (ac_stages[1] - ac_stages[0]) / (ex_sp_ener[1] - ex_sp_ener[0])
+                    c_e = ac_stages[0] - m_e * ex_sp_ener[0]
+                    ac_grid_ener.append(m_e * vg + c_e)
+                elif vg >= ex_sp_ener[-1]:
+                    m_e = (ac_stages[-1] - ac_stages[-2]) / (ex_sp_ener[-1] - ex_sp_ener[-2])
+                    c_e = ac_stages[-1] - m_e * ex_sp_ener[-1]
+                    ac_grid_ener.append(m_e * vg + c_e)
+                else:
+                    ac_val_e = ac_stages[-1]
+                    for idx_e in range(len(ex_sp_ener) - 1):
+                        if ex_sp_ener[idx_e] <= vg < ex_sp_ener[idx_e + 1]:
+                            m_e = (ac_stages[idx_e + 1] - ac_stages[idx_e]) / (ex_sp_ener[idx_e + 1] - ex_sp_ener[idx_e])
+                            c_e = ac_stages[idx_e] - m_e * ex_sp_ener[idx_e]
+                            ac_val_e = m_e * vg + c_e
+                            break
+                    ac_grid_ener.append(ac_val_e)
+            ac_grid_ener = np.array(ac_grid_ener)
+            vo2_rel_dem_ener = (ac_grid_ener * v_grid_ener * 100.0) / weight + 1.0
+        else:
+            # Fallback über Standard-Laufökonomie (ca. 210 ml/kg/km = 12.6 ml/min/kg pro m/s)
+            vo2_rel_dem_ener = (v_grid_ener * 12.6) + 3.5
+
+        d_vo2_ener = rel_vo2max - vo2_rel_dem_ener
+        lac_cl_ener = (0.02049 * vo2_rel_dem_ener) / 0.4
+        fat_pct_ener = np.zeros_like(v_grid_ener)
+        carb_pct_ener = np.zeros_like(v_grid_ener)
+        net_cl_ener = np.full_like(v_grid_ener, -9999.0)
+        vla_use_ener = float(vla_val if vla_val > 0 else 0.45)
+
+        for idx_e, (vr_e, dv_e) in enumerate(zip(vo2_rel_dem_ener, d_vo2_ener)):
+            if dv_e > 0 and vr_e > 0 and lac_cl_ener[idx_e] > 0:
+                adp_e = np.sqrt((0.0631 * vr_e) / dv_e)
+                pfk_e = 1.0 + (1.331 / (adp_e ** 3))
+                vla_min_e = (vla_use_ener * 60.0) / pfk_e
+                f_pct = max(0.0, min(100.0, 100.0 - (vla_min_e / lac_cl_ener[idx_e] * 100.0)))
+                fat_pct_ener[idx_e] = f_pct
+                carb_pct_ener[idx_e] = 100.0 - f_pct
+                net_cl_ener[idx_e] = lac_cl_ener[idx_e] - vla_min_e
+            else:
+                fat_pct_ener[idx_e] = 0.0
+                carb_pct_ener[idx_e] = 100.0
+
+        rq_ener = 0.7 + 0.3 * (carb_pct_ener / 100.0)
+        kal_eq_ener = (rq_ener - 0.7) * 5.094 + 19.6
+        ee_kcal_h_ener = (((vo2_rel_dem_ener * weight / 1000.0) * kal_eq_ener) * 60.0) / 4.186
+        ee_fat_kcal_h_ener = ee_kcal_h_ener * (fat_pct_ener / 100.0)
+        ee_kh_kcal_h_ener = ee_kcal_h_ener * (carb_pct_ener / 100.0)
+        carb_g_h_ener = ee_kh_kcal_h_ener / 4.063
+        fat_g_h_ener = ee_fat_kcal_h_ener / 9.3
+
+        valid_ener_mask = (d_vo2_ener > 0) & (v_grid_ener >= v_lo_ener - 1e-6) & (v_grid_ener <= v_hi_ener + 1e-6)
+        if np.sum(valid_ener_mask) < 5:
+            valid_ener_mask = (v_grid_ener >= v_lo_ener - 1e-6) & (v_grid_ener <= v_hi_ener + 1e-6)
+
+        v_vis_e = v_grid_ener[valid_ener_mask]
+        ee_vis_e = ee_kcal_h_ener[valid_ener_mask]
+        fat_kcal_vis_e = ee_fat_kcal_h_ener[valid_ener_mask]
+        fat_g_vis_e = fat_g_h_ener[valid_ener_mask]
+        kh_kcal_vis_e = ee_kh_kcal_h_ener[valid_ener_mask]
+        kh_g_vis_e = carb_g_h_ener[valid_ener_mask]
+        paces_vis_e = [format_pace_mmss(vv) for vv in v_vis_e]
+        kmh_vis_e = [vv * 3.6 for vv in v_vis_e]
+
+        fatmax_idx_e = int(np.argmax(net_cl_ener))
+        v_fatmax_e = float(v_grid_ener[fatmax_idx_e])
+
+        custom_hover_e = np.column_stack([
+            paces_vis_e,
+            [f"{k:.1f}".replace(".", ",") for k in kmh_vis_e],
+            [f"{int(round(val))}" for val in ee_vis_e],
+            [f"{val:.1f}".replace(".", ",") for val in fat_g_vis_e],
+            [f"{int(round(val))}" for val in fat_kcal_vis_e],
+            [f"{val:.1f}".replace(".", ",") for val in kh_g_vis_e],
+            [f"{int(round(val))}" for val in kh_kcal_vis_e],
+        ])
+
+        fig_stoff = go.Figure()
+
+        # Kurve 1: Gesamtenergieverbrauch [kcal/h] (Linke Y-Achse)
+        fig_stoff.add_trace(
+            go.Scatter(
+                x=v_vis_e,
+                y=ee_vis_e,
+                mode="lines",
+                line=dict(color="#595a59", width=3),
+                name="Gesamtenergieverbrauch [kcal/h]",
+                customdata=custom_hover_e,
+                hovertemplate=(
+                    "<b>Pace: %{customdata[0]} min/km (%{customdata[1]} km/h)</b><br>"
+                    "Gesamtenergie: <b>%{customdata[2]} kcal/h</b><br>"
+                    "Fettstoffwechsel: <b>%{customdata[3]} g/h Fett</b> (%{customdata[4]} kcal/h)<br>"
+                    "Kohlenhydrate: <b>%{customdata[5]} g/h KH</b> (%{customdata[6]} kcal/h)"
+                    "<extra></extra>"
+                ),
+                yaxis="y",
+            )
+        )
+
+        # Kurve 2: Fettverbrennung [kcal/h] (Linke Y-Achse)
+        fig_stoff.add_trace(
+            go.Scatter(
+                x=v_vis_e,
+                y=fat_kcal_vis_e,
+                mode="lines",
+                line=dict(color="#2cb7b9", width=3),
+                name="Fettstoffwechsel [kcal/h]",
+                hoverinfo="skip",
+                yaxis="y",
+            )
+        )
+
+        # Kurve 3: Kohlenhydratverbrauch [g/h] (Rechte Y-Achse)
+        fig_stoff.add_trace(
+            go.Scatter(
+                x=v_vis_e,
+                y=kh_g_vis_e,
+                mode="lines",
+                line=dict(color="#cdb663", width=3),
+                name="Kohlenhydratverbrauch [g/h]",
+                hoverinfo="skip",
+                yaxis="y2",
+            )
+        )
+
+        if v_lo_ener <= v_fatmax_e <= float(v_vis_e[-1]):
+            fig_stoff.add_vrect(
+                x0=max(float(v_vis_e[0]), v_fatmax_e - 0.08),
+                x1=min(float(v_vis_e[-1]), v_fatmax_e + 0.08),
+                fillcolor="rgba(44, 183, 185, 0.20)",
+                line_width=0,
+                layer="below",
+                annotation_text=f"Fatmax ({format_pace_mmss(v_fatmax_e)} min/km)",
+                annotation_position="top left",
+            )
+
+        if float(v_vis_e[0]) <= v_ans <= float(v_vis_e[-1]):
+            fig_stoff.add_vline(
+                x=v_ans,
+                line_dash="dash",
+                line_color="#595a59",
+                annotation_text=f"ANS ({ans_pace_str} min/km)",
+                annotation_position="top right",
+            )
+
+        # X-Achse mit Pace (min/km) & km/h Ticks beschriften, direkt am linken Rand startend wie im PDF
+        tick_v_vals = np.linspace(float(v_vis_e[0]), float(v_vis_e[-1]), 6)
+        tick_v_texts = [f"{format_pace_mmss(tv)} min/km<br>({tv*3.6:.1f} km/h)".replace(".", ",") for tv in tick_v_vals]
+
+        max_ee_y = float(np.max(ee_vis_e)) * 1.12 if len(ee_vis_e) > 0 else 1200.0
+        max_kh_y = float(np.max(kh_g_vis_e)) * 1.12 if len(kh_g_vis_e) > 0 else 300.0
+
+        fig_stoff.update_layout(
+            xaxis=dict(
+                title="Pace [min/km] / Geschwindigkeit [km/h]",
+                range=[float(v_vis_e[0]), float(v_vis_e[-1])],
+                tickvals=list(tick_v_vals),
+                ticktext=tick_v_texts,
+                gridcolor="#e6e6e6",
+            ),
+            yaxis=dict(
+                title=dict(text="Energie [kcal/h]", font=dict(color="#595a59")),
+                tickfont=dict(color="#595a59"),
+                range=[0.0, max_ee_y],
+                gridcolor="#e6e6e6",
+            ),
+            yaxis2=dict(
+                title=dict(text="Kohlenhydratverbrauch [g/h]", font=dict(color="#cdb663")),
+                tickfont=dict(color="#cdb663"),
+                range=[0.0, max_kh_y],
+                overlaying="y",
+                side="right",
+                showgrid=False,
+            ),
+            hovermode="x",
+            legend=dict(
+                orientation="h",
+                x=0.5,
+                xanchor="center",
+                y=1.12,
+                bgcolor="rgba(255,255,255,0.85)",
+            ),
+            height=400,
+            margin=dict(l=55, r=55, t=45, b=50),
+            plot_bgcolor="#f9f9f9",
+        )
+        st.plotly_chart(fig_stoff, use_container_width=True)
+    except Exception:
+        pass
+
+    # LAUFÖKONOMIE SECTION (über den Trainingsbereichen; standardmäßig nur RE [l/km], ohne m/s)
     if not spiro_df.empty and len(vo2_steady_abs) > 0 and any(v > 0 for v in vo2_steady_abs):
         st.markdown("---")
-        st.subheader("🏃 Laufökonomie & VLamax je Stufe")
+        st.subheader("Laufökonomie (Running Economy)")
+
+        n_stages = min(anzahl, len(vo2_steady_abs))
+        lo_hycys_list = calculate_laufokonomie_hycys_stages(
+            speeds_arr   = list(speed[:n_stages]),
+            vo2_abs_arr  = list(vo2_steady_abs[:n_stages]),
+            vco2_abs_arr = list(vco2_steady_abs[:n_stages]) if len(vco2_steady_abs) >= n_stages else [0.0]*n_stages,
+            weight       = weight
+        )
 
         lauf_rows = []
         for i in range(anzahl):
@@ -3680,13 +6055,13 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
             vco2_a = vco2_steady_abs[i] if i < len(vco2_steady_abs) else 0.0
             vo2_r  = vo2_steady_values[i]   # ml/min/kg
 
-            # RE in ml/kg/km (Literaturstandard): VO2ss_rel [ml/min/kg] / v [km/h] * 60
-            re_ml_kg_km = (vo2_r / v_kmh * 60.0) if (vo2_r > 0 and v_kmh > 0) else None
-
-            # RQ
+            re_ml_min_kg_ms = lo_hycys_list[i] if i < len(lo_hycys_list) else None
+            re_ml_kg_km = (re_ml_min_kg_ms * 1000.0 / 60.0) if re_ml_min_kg_ms is not None else None
+            re_lit_ml_kg_km = (vo2_r / (v_ms * 3.6) * 60.0) if (vo2_r > 0 and v_ms > 0) else None
+            re_l_km = (re_ml_kg_km * weight / 1000.0) if (re_ml_kg_km is not None and weight > 0) else None
+            re_kcal_km = (re_l_km * 21.1 / 4.186) if re_l_km is not None else None
             rq_val = (vco2_a / vo2_a) if (vco2_a > 0 and vo2_a > 0) else None
 
-            # VLamax je Stufe via bestehender Funktion
             vla_stage = None
             if rel_vo2max > 0 and vo2_r > 0 and len(vo2_steady_values) > 1:
                 vla_stage, _, _ = calculate_vlamax_for_v(
@@ -3697,195 +6072,386 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
             pace_str = f"{int(pace_sec // 60)}:{int(pace_sec % 60):02d}"
 
             lauf_rows.append({
-                'v_ms':       v_ms,
-                'v_kmh':      v_kmh,
-                'pace':       pace_str,
-                'vo2_abs':    vo2_a,
-                'vo2_rel':    vo2_r,
-                'rq':         rq_val,
-                're_ml_kg_km':re_ml_kg_km,
-                'vla_stage':  vla_stage
+                'stage_idx':       i + 1,
+                'v_ms':            v_ms,
+                'v_kmh':           v_kmh,
+                'pace':            pace_str,
+                'vo2_abs':         vo2_a,
+                'vo2_rel':         vo2_r,
+                'rq':              rq_val,
+                're_ml_kg_km':     re_ml_kg_km,
+                're_lit_ml_kg_km': re_lit_ml_kg_km,
+                're_l_km':         re_l_km,
+                're_kcal_km':      re_kcal_km,
+                're_ml_min_kg_ms': re_ml_min_kg_ms,
+                'vla_stage':       vla_stage
             })
 
-        valid_rows = [r for r in lauf_rows if r['re_ml_kg_km'] is not None]
+        valid_rows = [r for r in lauf_rows if r['re_l_km'] is not None]
 
         if len(valid_rows) >= 1:
-            col_lt, col_lc = st.columns([1, 1.3])
+            col_re_opt1, col_re_opt2 = st.columns([1.2, 1.0])
+            with col_re_opt1:
+                optional_re_units = st.multiselect(
+                    "Weitere Einheiten optional einblenden (Standard: nur RE [l/km]):",
+                    options=[
+                        "RE [ml/kg/km]",
+                        "RE Lit. [ml/kg/km]",
+                        "LÖ [ml/min/kg/(m/s)]",
+                        "Energie [kcal/km]",
+                    ],
+                    default=[],
+                    key="lauf_re_optional_units",
+                )
+            with col_re_opt2:
+                re_pot_pct = int(
+                    st.slider(
+                        "Potenzial Laufökonomie-Verbesserung",
+                        min_value=-15,
+                        max_value=0,
+                        value=-5,
+                        step=1,
+                        format="%d %%",
+                        key="lauf_re_pot_slider",
+                    )
+                )
+
+            re_pot_factor = 1.0 + (re_pot_pct / 100.0)
+            col_lt, col_lc = st.columns([1.15, 1.25])
 
             with col_lt:
-                st.markdown("**Messwerte je Stufe**")
-                df_lauf_display = pd.DataFrame([{
-                    'v [km/h]':           r['v_kmh'],
-                    'Pace [min/km]':      r['pace'],
-                    'VO2ss [ml/min/kg]':  round(r['vo2_rel'], 2) if r['vo2_rel'] > 0 else '-',
-                    'RQ':                 round(r['rq'], 3)      if r['rq']       else '-',
-                    'RE [ml/kg/km]':      round(r['re_ml_kg_km'], 1) if r['re_ml_kg_km'] else '-',
-                    'VLamax [mmol/L/s]':  round(r['vla_stage'], 3)   if r['vla_stage']   else '-'
-                } for r in lauf_rows])
-                st.dataframe(df_lauf_display, hide_index=True, width='stretch')
-                st.caption(
-                    "RE [ml/kg/km] = VO2ss [ml/min/kg] ÷ v [km/h] × 60  "
-                    "| VLamax je Stufe aus aerober Metabolik-Gleichung"
+                st.markdown("**Messwerte & Potenzial je Stufe**")
+                display_records = []
+                for r in lauf_rows:
+                    re_ist_v = r['re_l_km']
+                    re_pot_v = (re_ist_v * re_pot_factor) if re_ist_v is not None else None
+                    row_dict = {
+                        'Pace [min/km]':       r['pace'],
+                        'RE Ist [l/km]':       f"{re_ist_v:.2f}".replace('.', ',') if re_ist_v is not None else '-',
+                        'RE Potenzial [l/km]': f"{re_pot_v:.2f}".replace('.', ',') if re_pot_v is not None else '-',
+                    }
+                    if "RE [ml/kg/km]" in optional_re_units:
+                        row_dict['RE [ml/kg/km]'] = f"{r['re_ml_kg_km']:.1f}".replace('.', ',') if r['re_ml_kg_km'] is not None else '-'
+                    if "RE Lit. [ml/kg/km]" in optional_re_units:
+                        row_dict['RE Lit. [ml/kg/km]'] = f"{r['re_lit_ml_kg_km']:.1f}".replace('.', ',') if r['re_lit_ml_kg_km'] is not None else '-'
+                    if "LÖ [ml/min/kg/(m/s)]" in optional_re_units:
+                        row_dict['LÖ [ml/min/kg/(m/s)]'] = f"{r['re_ml_min_kg_ms']:.2f}".replace('.', ',') if r['re_ml_min_kg_ms'] is not None else '-'
+                    if "Energie [kcal/km]" in optional_re_units:
+                        row_dict['Energie [kcal/km]'] = f"{r['re_kcal_km']:.1f}".replace('.', ',') if r['re_kcal_km'] is not None else '-'
+                    display_records.append(row_dict)
+
+                df_lauf_display = pd.DataFrame(display_records)
+                render_centered_html_table(df_lauf_display)
+                st.caption("RE [l/km] = Sauerstoffverbrauch pro Kilometer (HYCYS netto, RQ-normiert). Je niedriger der Balken, desto ökonomischer der Laufstil.")
+
+                # Praxis-Übersetzung des Laufökonomie-Potenzials (3 anschauliche Coaching-Karten)
+                avg_re_ist = float(np.mean([r['re_l_km'] for r in valid_rows]))
+                avg_re_pot = avg_re_ist * re_pot_factor
+                avg_o2_saved_l_km = max(0.0, avg_re_ist - avg_re_pot)
+                kcal_saved_marathon = avg_o2_saved_l_km * (21.1 / 4.186) * 42.195
+                kh_saved_marathon_g = kcal_saved_marathon / 4.063
+                v_ans_re_pot = (v_ans / re_pot_factor) if re_pot_factor > 0 else v_ans
+                pace_ans_ist_s = (1000.0 / v_ans) if v_ans > 0 else 0.0
+                pace_ans_pot_s = (1000.0 / v_ans_re_pot) if v_ans_re_pot > 0 else 0.0
+                sec_gained_per_km = max(0.0, pace_ans_ist_s - pace_ans_pot_s)
+
+                o2_saved_str = f"{avg_o2_saved_l_km:.2f}".replace(".", ",")
+                re_pot_avg_str = f"{avg_re_pot:.2f}".replace(".", ",")
+                re_ist_avg_str = f"{avg_re_ist:.2f}".replace(".", ",")
+                sec_gain_str = f"{sec_gained_per_km:.0f}"
+
+                st.markdown(
+                    f"""
+                    <div style="margin-top: 10px; background: #f8fafa; border: 1px solid #d5ecec; border-left: 4px solid #cdb663; border-radius: 6px; padding: 10px 14px;">
+                        <div style="font-size: 12px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; margin-bottom: 6px;">
+                            Praxis-Effekt bei {abs(re_pot_pct)} % besserer Laufökonomie
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; text-align: center;">
+                            <div style="background: #ffffff; border: 1px solid #e6e6e6; border-radius: 5px; padding: 6px;">
+                                <div style="font-size: 11px; color: #595a59;">Ø O₂-Ersparnis</div>
+                                <div style="font-size: 15px; font-weight: 800; color: #2cb7b9;">-{o2_saved_str} l/km</div>
+                                <div style="font-size: 10.5px; color: #777;">Ø {re_pot_avg_str} statt {re_ist_avg_str} l/km</div>
+                            </div>
+                            <div style="background: #ffffff; border: 1px solid #e6e6e6; border-radius: 5px; padding: 6px;">
+                                <div style="font-size: 11px; color: #595a59;">Ersparnis Marathon</div>
+                                <div style="font-size: 15px; font-weight: 800; color: #cdb663;">-{int(round(kcal_saved_marathon))} kcal</div>
+                                <div style="font-size: 10.5px; color: #777;">≈ {int(round(kh_saved_marathon_g))} g Kohlenhydrate</div>
+                            </div>
+                            <div style="background: #ffffff; border: 1px solid #e6e6e6; border-radius: 5px; padding: 6px;">
+                                <div style="font-size: 11px; color: #595a59;">ANS-Pace Gewinn</div>
+                                <div style="font-size: 15px; font-weight: 800; color: #1b8a5a;">-{sec_gain_str} Sek./km</div>
+                                <div style="font-size: 10.5px; color: #777;">{format_pace_mmss(v_ans_re_pot)} statt {ans_pace_str} min/km</div>
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
 
             with col_lc:
-                # Chart: RE [ml/kg/km] und VO2ss auf zwei Y-Achsen
-                speeds_v    = [r['v_kmh']       for r in valid_rows]
-                re_vals     = [r['re_ml_kg_km'] for r in valid_rows]
-                vo2_r_vals  = [r['vo2_rel']     for r in lauf_rows if r['vo2_rel'] > 0]
-                speeds_vo2  = [r['v_kmh']       for r in lauf_rows if r['vo2_rel'] > 0]
+                x_labels = [
+                    f"<b>{r['pace']} min/km</b>"
+                    for r in valid_rows
+                ]
+                re_ist_vals = [float(r['re_l_km']) for r in valid_rows]
+                re_pot_vals = [float(r['re_l_km']) * re_pot_factor for r in valid_rows]
+                re_diff_vals = [pot_v - ist_v for ist_v, pot_v in zip(re_ist_vals, re_pot_vals)]
 
                 fig_lauf = go.Figure()
-
-                if len(speeds_v) >= 2:
-                    v_interp  = np.linspace(min(speeds_v), max(speeds_v), 300)
-                    re_interp = np.interp(v_interp, speeds_v, re_vals)
-                    fig_lauf.add_trace(go.Scatter(
-                        x=v_interp, y=re_interp,
-                        mode='lines',
-                        line=dict(color='#00a1e0', width=2.5),
-                        name='RE [ml/kg/km]',
-                        yaxis='y1'
-                    ))
-
-                fig_lauf.add_trace(go.Scatter(
-                    x=speeds_v, y=re_vals,
-                    mode='markers',
-                    marker=dict(color='#00a1e0', size=10, symbol='circle',
-                                line=dict(color='white', width=1.5)),
-                    name='RE Messp.',
-                    yaxis='y1'
-                ))
-
-                if len(speeds_vo2) >= 1:
-                    v_vo2_interp = np.linspace(min(speeds_vo2), max(speeds_vo2), 300)
-                    vo2_interp   = np.interp(v_vo2_interp, speeds_vo2, vo2_r_vals)
-                    fig_lauf.add_trace(go.Scatter(
-                        x=v_vo2_interp, y=vo2_interp,
-                        mode='lines',
-                        line=dict(color='#ff7f0e', width=2, dash='dot'),
-                        name='VO2ss [ml/min/kg]',
-                        yaxis='y2'
-                    ))
-                    fig_lauf.add_trace(go.Scatter(
-                        x=speeds_vo2, y=vo2_r_vals,
-                        mode='markers',
-                        marker=dict(color='#ff7f0e', size=8),
-                        name='VO2ss Messp.',
-                        yaxis='y2'
-                    ))
-
-                fig_lauf.update_layout(
-                    title='Laufökonomie (ml/kg/km) & VO2ss',
-                    xaxis_title='Geschwindigkeit [km/h]',
-                    yaxis=dict(
-                        title=dict(text='RE [ml/kg/km]', font=dict(color='#00a1e0')),
-                        tickfont=dict(color='#00a1e0')
-                    ),
-                    yaxis2=dict(
-                        title=dict(text='VO2ss [ml/min/kg]', font=dict(color='#ff7f0e')),
-                        tickfont=dict(color='#ff7f0e'),
-                        overlaying='y',
-                        side='right'
-                    ),
-                    legend=dict(x=0.01, y=0.99, bgcolor='rgba(255,255,255,0.7)'),
-                    height=380,
-                    margin=dict(l=60, r=70, t=50, b=50),
-                    plot_bgcolor='#f9f9f9'
+                fig_lauf.add_trace(
+                    go.Bar(
+                        x=x_labels,
+                        y=re_ist_vals,
+                        name="Ist-Verbrauch [l/km]",
+                        marker=dict(color="#2cb7b9", line=dict(color="#1d8f91", width=1)),
+                        text=[f"{v:.2f} l/km".replace(".", ",") for v in re_ist_vals],
+                        textposition="outside",
+                        textfont=dict(size=11, color="#1a1a1a", family="Arial"),
+                    )
                 )
-                st.plotly_chart(fig_lauf, width='stretch')
+                if re_pot_pct < 0:
+                    fig_lauf.add_trace(
+                        go.Bar(
+                            x=x_labels,
+                            y=re_pot_vals,
+                            name=f"Potenzial ({re_pot_pct} %) [l/km]",
+                            marker=dict(color="#cdb663", line=dict(color="#a69043", width=1)),
+                            text=[
+                                f"<b>{pv:.2f}</b><br><span style='font-size:10px;'>({dv:+.2f})</span>".replace(".", ",")
+                                for pv, dv in zip(re_pot_vals, re_diff_vals)
+                            ],
+                            textposition="outside",
+                            textfont=dict(size=11, color="#6b5c22", family="Arial"),
+                        )
+                    )
 
-    # EXPERTEN TOOLS
-    st.markdown("---")
-    with st.expander("Experten Tools zum Vergleich mit einer bestehenden HYCYS Diagnostik"):
-        if not spiro_df.empty:
-            st.subheader("Spiro-Synchronisation & Rohdaten")
-            import plotly.graph_objects as go
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(
-                x=spiro_df['Time'],
-                y=spiro_df['VO2'],
-                mode='lines+markers',
-                name='VO2',
-                line=dict(color='gray', width=1.5),
-                marker=dict(size=4),
-                hovertemplate='Zeit: %{x}s<br>VO2: %{y:.1f} ml/min<extra></extra>'
-            ))
-            
-            shapes = []
-            for i, (s_t, e_t) in enumerate(window_coords):
-                shapes.append(dict(
-                    type="rect",
-                    xref="x",
-                    yref="paper",
-                    x0=s_t,
-                    y0=0,
-                    x1=e_t,
-                    y1=1,
-                    fillcolor="#00a1e0",
-                    opacity=0.3,
-                    layer="below",
-                    line_width=0,
+                max_bar_y = max(re_ist_vals) if len(re_ist_vals) > 0 else 15.0
+                min_bar_y = max(0.0, min(re_pot_vals) * 0.72) if len(re_pot_vals) > 0 else 0.0
+                fig_lauf.update_layout(
+                    title=dict(
+                        text="<b>Sauerstoffverbrauch pro Kilometer: Ist vs. Potenzial (RE [l/km])</b>",
+                        font=dict(size=13.5, color="#1a1a1a"),
+                    ),
+                    barmode="group",
+                    bargap=0.25,
+                    bargroupgap=0.10,
+                    xaxis=dict(title="Pace [min/km]"),
+                    yaxis=dict(
+                        title=dict(text="RE [l O₂ / km]", font=dict(color="#1a1a1a")),
+                        range=[min_bar_y, max_bar_y * 1.18],
+                        gridcolor="rgba(0,0,0,0.08)",
+                    ),
+                    legend=dict(
+                        orientation="h",
+                        x=0.5,
+                        xanchor="center",
+                        y=1.11,
+                        bgcolor="rgba(255,255,255,0.8)",
+                    ),
+                    height=395,
+                    margin=dict(l=55, r=25, t=65, b=45),
+                    plot_bgcolor="#f9f9f9",
+                )
+                st.plotly_chart(fig_lauf, use_container_width=True)
+
+    if not is_lauf_pres:
+        pot_sim_dict_lauf = render_ans_coaching_diagrams(
+            mode="running",
+            weight_ist=float(weight),
+            bf_ist=float(body_fat_pct),
+            abs_vo2max_ist=float(abs_vo2max),
+            rel_vo2max_ist=float(rel_vo2max),
+            vlamax_ist=float(vla_val if vla_val > 0 else 0.45),
+            ans_abs_ist=float(v_ans),
+            ans_rel_ist=float(v_ans),
+            solve_ans_fn=_solve_ans_lauf,
+            default_vo2_pct=float(vo2_change * 100.0) if vo2_change != 0 else 5.0,
+            default_vla_pct=float(vla_change * 100.0) if vla_change != 0 else -10.0,
+            default_bf_delta=-1.5,
+            key_prefix="lauf",
+            is_presentation=False,
+        )
+
+        # EXPERTEN TOOLS (nur in der Diagnostik-Ansicht)
+        st.markdown("---")
+        with st.expander("Experten Tools zum Vergleich mit einer bestehenden HYCYS Diagnostik"):
+            if not spiro_df.empty:
+                st.subheader("Spiro-Synchronisation & Rohdaten")
+                import plotly.graph_objects as go
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(
+                    x=spiro_df['Time'],
+                    y=spiro_df['VO2'],
+                    mode='lines+markers',
+                    name='VO2',
+                    line=dict(color='gray', width=1.5),
+                    marker=dict(size=4),
+                    hovertemplate='Zeit: %{x}s<br>VO2: %{y:.1f} ml/min<extra></extra>'
                 ))
+                
+                shapes = []
+                for i, (s_t, e_t) in enumerate(window_coords):
+                    shapes.append(dict(
+                        type="rect",
+                        xref="x",
+                        yref="paper",
+                        x0=s_t,
+                        y0=0,
+                        x1=e_t,
+                        y1=1,
+                        fillcolor="#00a1e0",
+                        opacity=0.3,
+                        layer="below",
+                        line_width=0,
+                    ))
+                
+                fig2.update_layout(
+                    xaxis=dict(title=dict(text="Zeit (s)")),
+                    yaxis=dict(title=dict(text="VO2 (ml/min)")),
+                    shapes=shapes,
+                    height=350,
+                    margin=dict(l=60, r=60, t=20, b=50),
+                    plot_bgcolor='#f9f9f9',
+                    showlegend=False
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+                
+                col_diag1, col_diag2 = st.columns(2)
+                with col_diag1:
+                    st.write("**Metabolische Vergleichswerte:**")
+                    st.write(f"- Berechnete VO2max: {rel_vo2max:.2f} ml/min/kg")
+                with col_diag2:
+                    st.write("**Stufen-VO2 (relativ):**")
+                    render_centered_html_table(pd.DataFrame({"Stufe": [f"S{i+1}" for i in range(anzahl)], "VO2 rel": [f"{v:.2f}" for v in vo2_steady_values]}))
             
-            fig2.update_layout(
-                xaxis=dict(title=dict(text="Zeit (s)")),
-                yaxis=dict(title=dict(text="VO2 (ml/min)")),
-                shapes=shapes,
-                height=350,
-                margin=dict(l=60, r=60, t=20, b=50),
-                plot_bgcolor='#f9f9f9',
-                showlegend=False
-            )
-            st.plotly_chart(fig2, use_container_width=True)
-            
-            col_diag1, col_diag2 = st.columns(2)
-            with col_diag1:
-                st.write("**Metabolische Vergleichswerte:**")
-                st.write(f"- Berechnete VO2max: {rel_vo2max:.2f} ml/min/kg")
-            with col_diag2:
-                st.write("**Stufen-VO2 (relativ):**")
-                st.dataframe(pd.DataFrame({"Stufe": [f"S{i+1}" for i in range(anzahl)], "VO2 rel": [f"{v:.2f}" for v in vo2_steady_values]}), hide_index=True)
-        
-        st.subheader("Stufenauswertung")
-        if not spiro_df.empty:
-            step_data = []
-            for i in range(anzahl):
-                v_ms   = speed[i]
-                v_kmh  = round(v_ms * 3.6, 1)
-                pace_s = (1000.0 / v_ms) if v_ms > 0 else 0
-                pace_str = f"{int(pace_s // 60)}:{int(pace_s % 60):02d}"
-                vo2_a  = vo2_steady_abs[i]  if i < len(vo2_steady_abs)  else 0.0
-                vco2_a = vco2_steady_abs[i] if i < len(vco2_steady_abs) else 0.0
-                vo2_r  = vo2_steady_values[i]
-                rq_val   = (vco2_a / vo2_a) if (vco2_a > 0 and vo2_a > 0) else None
-                rq_str   = f"{rq_val:.3f}" if rq_val else '-'
-                re_kg_km = (vo2_r / (v_ms * 3.6) * 60.0) if (vo2_r > 0 and v_ms > 0) else None
-                step_data.append({
-                    "Stufe":              f"{i+1}",
-                    "v [km/h]":           v_kmh,
-                    "Pace [min/km]":      pace_str,
-                    "VO2ss [ml/min]": round(vo2_a, 1)  if vo2_a > 0 else '-',
-                    "VO2ss [ml/min/kg]": round(vo2_r, 2) if vo2_r > 0 else '-',
-                    "RQ":                 rq_str,
-                    "RE [ml/kg/km]":     round(re_kg_km, 1) if re_kg_km else '-'
-                })
-            st.dataframe(pd.DataFrame(step_data), hide_index=True, width='stretch')
-            st.caption("RE [ml/kg/km] = VO2ss [ml/min/kg] ÷ v [km/h] × 60  |  Literaturstandard Laufökonomie")
+            st.subheader("Stufenauswertung")
+            if not spiro_df.empty:
+                step_data = []
+                for i in range(anzahl):
+                    v_ms   = speed[i]
+                    pace_s = (1000.0 / v_ms) if v_ms > 0 else 0
+                    pace_str = f"{int(pace_s // 60)}:{int(pace_s % 60):02d}"
+                    vo2_a  = vo2_steady_abs[i]  if i < len(vo2_steady_abs)  else 0.0
+                    vco2_a = vco2_steady_abs[i] if i < len(vco2_steady_abs) else 0.0
+                    vo2_r  = vo2_steady_values[i]
+                    rq_val   = (vco2_a / vo2_a) if (vco2_a > 0 and vo2_a > 0) else None
+                    rq_str   = f"{rq_val:.3f}" if rq_val else '-'
+                    # LO via exakter HYCYS-Methodik (stages-Funktion)
+                    lo_exp_list = calculate_laufokonomie_hycys_stages(
+                        speeds_arr   = list(speed[:anzahl]),
+                        vo2_abs_arr  = list(vo2_steady_abs[:anzahl]) if len(vo2_steady_abs) >= anzahl else [0.0]*anzahl,
+                        vco2_abs_arr = list(vco2_steady_abs[:anzahl]) if len(vco2_steady_abs) >= anzahl else [0.0]*anzahl,
+                        weight       = weight
+                    ) if len(vo2_steady_abs) > 0 else [None]*anzahl
+                    lo_hycys = lo_exp_list[i] if i < len(lo_exp_list) else None
+                    re_kg_km = (lo_hycys * 1000.0 / 60.0) if lo_hycys is not None else None
+                    re_lit_kg_km = (vo2_r / (v_ms * 3.6) * 60.0) if (vo2_r > 0 and v_ms > 0) else None
+                    re_l_km_exp = (re_kg_km * weight / 1000.0) if (re_kg_km is not None and weight > 0) else None
+                    re_kcal_km_exp = (re_l_km_exp * 21.1 / 4.186) if re_l_km_exp is not None else None
 
-    # --- PDF DOWNLOAD BUTTON ---
+                    step_data.append({
+                        "Stufe":                     f"{i+1}",
+                        "v [m/s]":                   v_ms,
+                        "Pace [min/km]":             pace_str,
+                        "VO2ss [ml/min]":            round(vo2_a, 1)  if vo2_a > 0 else '-',
+                        "VO2ss [ml/min/kg]":         round(vo2_r, 2) if vo2_r > 0 else '-',
+                        "RQ":                        rq_str,
+                        "LÖ [ml/min/kg/(m/s)]":     round(lo_hycys, 2) if lo_hycys else '-',
+                        "RE [ml/kg/km]":             round(re_kg_km, 1) if re_kg_km else '-',
+                        "RE Lit. [ml/kg/km]":        round(re_lit_kg_km, 1) if re_lit_kg_km else '-',
+                        "RE [l/km]":                 round(re_l_km_exp, 2) if re_l_km_exp else '-',
+                        "Energie [kcal/km]":         round(re_kcal_km_exp, 1) if re_kcal_km_exp else '-'
+                    })
+                render_centered_html_table(pd.DataFrame(step_data))
+                st.caption("LÖ [ml/min/kg/(m/s)] & RE [ml/kg/km] = HYCYS Methodik (netto, RQ-normiert)  |  RE Lit. [ml/kg/km] = Literaturstandard (brutto)  |  RE [l/km] & Energie [kcal/km] = gewichtsneutral (HYCYS netto)")
+
+    # TRAININGSBEREICHE (ZONE 1-5) AN DIE UNTERSTE STELLE DER SEITE
+    if not df_res.empty:
+        st.markdown("---")
+        col_z_title, col_z_mode = st.columns([1.8, 1.0])
+        with col_z_title:
+            st.subheader(f"Trainingsbereiche (Zone 1–5) – basierend auf LTP1 & {selected_model_name}")
+        with col_z_mode:
+            if is_lauf_pres and pot_sim_dict_lauf is not None:
+                zone_basis_sel = st.radio(
+                    "Basis für Pace-Zonen:",
+                    options=["Ist-Zustand (aktuell)", "Coaching-Potenzial (simuliert)"],
+                    horizontal=True,
+                    key="lauf_pres_zone_basis",
+                )
+            else:
+                zone_basis_sel = "Ist-Zustand (aktuell)"
+
+        ans_hf_num = float(hf_ans_val) if isinstance(hf_ans_val, (int, float, np.number)) else 0.0
+        if zone_basis_sel == "Coaching-Potenzial (simuliert)" and pot_sim_dict_lauf is not None:
+            v_ans_for_zones = float(pot_sim_dict_lauf["ans_rel_pot"])
+            scale_z = (v_ans_for_zones / v_ans) if v_ans > 0 else 1.0
+            v_ltp1_for_zones = (v_ltp1_val * scale_z) if v_ltp1_val is not None else None
+        else:
+            v_ans_for_zones = v_ans
+            v_ltp1_for_zones = v_ltp1_val
+
+        zones_ui = build_training_zones_variante_a(v_ltp1_for_zones, hf_ltp1_val, v_ans_for_zones, ans_hf_num)
+        df_zones_ui = pd.DataFrame([
+            {
+                "Trainingsbereich": zn,
+                "Pace min [min/km]": p_min,
+                "Pace max [min/km]": p_max,
+                "Pace Ziel [min/km]": p_zl,
+                "HF min [bpm]": hr_mn,
+                "HF max [bpm]": hr_mx,
+                "HF Ziel [bpm]": hr_zl,
+            }
+            for (zn, p_min, p_max, p_zl, hr_mn, hr_mx, hr_zl) in zones_ui
+        ])
+        render_centered_html_table(df_zones_ui)
+
+
+    # --- PDF DOWNLOAD & GOOGLE DRIVE ABLAGE ---
     st.markdown("---")
     if fig_laktat is not None:
         pdf_bytes = create_pdf(
             athlete_name, birthdate, test_date, st.session_state.get("diagnostik_type", "Running BLUE"), weight, body_fat_pct, rel_vo2max, df_res, fig_laktat,
-            coach, sportart, kategorie, height, speed, lactate, hr, vo2_steady_values, vo2_steady_abs, vco2_steady_abs, uploaded_file
+            coach, sportart, kategorie, height, speed, lactate, hr, vo2_steady_values, vo2_steady_abs, vco2_steady_abs, uploaded_file,
+            v_ltp1=v_ltp1_val, hf_ltp1=hf_ltp1_val
         )
-        
-        st.download_button(
-            label="📄 PDF Report herunterladen",
-            data=pdf_bytes,
-            file_name=f"HYCYS_Laufdiagnostik_{athlete_name.replace(' ', '_')}.pdf",
-            mime="application/pdf",
-            type="primary"
+
+        excel_bytes_lauf = None
+        try:
+            excel_bytes_lauf = create_hycys_excel_lauf(
+                athlete_name=athlete_name,
+                birthdate=birthdate,
+                test_date=test_date,
+                gender_str=st.session_state.get("gender", "männlich"),
+                diagnostik_type=st.session_state.get("diagnostik_type", "Running BLUE"),
+                coach=coach,
+                sportart=sportart,
+                kategorie=kategorie,
+                height=height,
+                weight=weight,
+                body_fat_pct=body_fat_pct,
+                df_sf=st.session_state.get("df_sf"),
+                ruhe_lac=ruhe_lac,
+                ruhe_hr=ruhe_hr,
+                speed=list(speed),
+                lactate=list(lactate),
+                hr=list(hr),
+                abs_vo2max=abs_vo2max,
+                vo2_steady_abs=list(vo2_steady_abs),
+                vco2_steady_abs=list(vco2_steady_abs),
+                uploaded_file=uploaded_file,
+                uploaded_ramp=uploaded_ramp if separate_ramp else None,
+            )
+        except Exception as e_xls_lauf:
+            st.warning(f"Hinweis: HYCYS-Excel konnte nicht erzeugt werden ({e_xls_lauf}).")
+
+        render_gdrive_upload_section(
+            pdf_bytes=pdf_bytes,
+            diagnostik_type=st.session_state.get("diagnostik_type", "Running BLUE"),
+            athlete_name=athlete_name,
+            test_date=test_date,
+            gender_str=st.session_state.get("gender", "männlich"),
+            key_prefix="laufen",
+            excel_bytes=excel_bytes_lauf,
         )
 
