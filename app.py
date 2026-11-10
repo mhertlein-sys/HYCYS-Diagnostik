@@ -95,18 +95,10 @@ def detect_sprint_end(sprint_powers, sprint_times, min_points=SPRINT_PLATEAU_MIN
     return float(max(sprint_times)), None
 
 
-# TEMPORARY SRM DUMP
-srm_file_path = "C:\\Users\\marku\\OneDrive\\Markus_HYCYS\\Sonstiges\\Laufauswertung App\\Radsport Auswertungen\\Ralph Ziegaus - 2026-05-22-10-28-31.srm"
-if os.path.exists(srm_file_path):
-    with open(srm_file_path, "rb") as f:
-        data = f.read()
-    with open("C:\\Users\\marku\\OneDrive\\Markus_HYCYS\\Sonstiges\\Laufauswertung App\\srm_hex_dump.txt", "w") as out:
-        out.write(f"SRM File Size: {len(data)} bytes\n")
-        for i in range(0, len(data), 16):
-            chunk = data[i:i+16]
-            hex_str = " ".join(f"{b:02x}" for b in chunk)
-            ascii_str = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-            out.write(f"{i:04x} | {hex_str:<47} | {ascii_str}\n")
+# Einheitliche Schriftart für alle Matplotlib-Grafiken (Windows lokal & Linux auf Streamlit Cloud)
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Arial", "Liberation Sans", "DejaVu Sans", "Helvetica", "sans-serif"]
+plt.rcParams["axes.unicode_minus"] = False
 
 # Import PDF generator from dedicated module
 from pdf_rad import create_pdf_rad
@@ -495,19 +487,19 @@ def create_hycys_excel_lauf(
                 ws.cell(target_row, start_col, _seconds_to_excel_time(t_sec))
                 for offset in range(1, 6):
                     val = pd.to_numeric(df_raw.iloc[r_idx, 9 + offset], errors="coerce")
-                    ws.cell(target_row, start_col + offset, float(val) if pd.notna(val) else None)
+                    if pd.notna(val):
+                        ws.cell(target_row, start_col + offset, float(val))
                 written += 1
             return written
         except Exception:
             return 0
 
     _write_spiro_block(uploaded_file, 2)   # Spalten B..G (Stufentest)
-    n_ramp = _write_spiro_block(uploaded_ramp, 11)  # Spalten K..P (Rampentest)
+    _write_spiro_block(uploaded_ramp, 11)  # Spalten K..P (Rampentest)
 
-    # VO2max [ml/min] in V56 hinterlegen, falls kein separater Rampentest-Block geschrieben wurde oder Override aktiv ist
+    # Über 30s gemittelte VO2max [ml/min] direkt in V56 hinterlegen
     if abs_vo2max and float(abs_vo2max) > 0:
-        if n_ramp == 0:
-            ws["V56"] = float(abs_vo2max)
+        ws["V56"] = float(abs_vo2max)
 
     # Steady-State VO2 & VCO2 je Stufe in 'Calculation Spirometrie' (M8:N15) übertragen,
     # damit 'Calculation Physiologie' exakt mit den App-Stufenfenstern übereinstimmt
@@ -929,7 +921,7 @@ def upload_files_to_gdrive(
                 "Google weist **Service-Accounts** in persönlichen *'Meine Ablage'*-Ordnern **0 Byte eigenen Speicherplatz** zu "
                 "(deshalb konnte der Ordner `Muxel_Christoph` mit 0 Byte angelegt werden, die `.pdf`- und `.xlsx`-Dateien aber nicht).  \n\n"
                 "**So löst du das in 1 Minute (2 Möglichkeiten):**  \n"
-                "1. **Über euer Google Workspace (`hycys.de` – ohne neuen Schlüssel):** Legt den Zielordner in Google Drive unter **'Geteilte Ablagen' (Shared Drives)** statt unter *'Meine Ablage'* an und gebt ihn für `markus-hertlein@diagnostik-test-514115.iam.gserviceaccount.com` als **Inhaltsmanager** frei. In *Geteilten Ablagen* zählt das Speicherkontingent der Organisation und der Service-Account funktioniert sofort!  \n"
+                "1. **Über euer Google Workspace (`hycys.de` – ohne neuen Schlüssel):** Legt den Zielordner in Google Drive unter **'Geteilte Ablagen' (Shared Drives)** statt unter *'Meine Ablage'* an und gebt ihn für die E-Mail-Adresse eures Service-Accounts als **Inhaltsmanager** frei. In *Geteilten Ablagen* zählt das Speicherkontingent der Organisation und der Service-Account funktioniert sofort!  \n"
                 "2. **Oder für 'Meine Ablage' (OAuth Desktop-Login):** Erstelle in der Google Cloud Console (*APIs & Dienste ➔ Anmeldedaten ➔ + Anmeldedaten erstellen*) eine **OAuth-Client-ID (Typ: Desktop-App)**, lade die JSON-Datei unten unter **'🔑 Google-Drive-Verbindung einrichten / ändern'** hoch und klicke noch einmal auf Speichern – dann öffnet sich einmalig dein Browser zur Bestätigung und die Dateien nutzen deinen eigenen Speicherplatz (`m.hertlein@hycys.de`).",
             )
         return False, f"Google Drive API Fehler: {e_api}"
@@ -3493,6 +3485,47 @@ if test_type != st.session_state.last_test_type:
         
     st.rerun()
 
+def detect_spiro_stage_ends(df_spiro, anzahl):
+    n_rows = len(df_spiro)
+    if n_rows < 10:
+        return []
+    t_diffs = df_spiro['Time'].diff().dropna()
+    dt = t_diffs.median() if len(t_diffs) > 0 else 10.0
+    step_30s = max(1, int(round(30.0 / dt)))
+    step_60s = max(step_30s, int(round(60.0 / dt)))
+    drops = []
+    for i in range(n_rows - step_30s):
+        t1 = float(df_spiro['Time'].iloc[i])
+        vo2_1 = float(df_spiro['VO2'].iloc[i])
+        if vo2_1 <= 0 or pd.isna(vo2_1):
+            continue
+        vo2_2 = float(df_spiro['VO2'].iloc[i + step_30s])
+        t2 = float(df_spiro['Time'].iloc[i + step_30s])
+        pct_drop = (vo2_1 - vo2_2) / vo2_1 if (20 <= (t2 - t1) <= 45 and pd.notna(vo2_2)) else 0.0
+        # Falls der Abfall erst im zweiten 30s-Intervall der Pause voll sichtbar wird (z. B. bei 30s-Mischkammer):
+        if i + step_60s < n_rows:
+            vo2_3 = float(df_spiro['VO2'].iloc[i + step_60s])
+            t3 = float(df_spiro['Time'].iloc[i + step_60s])
+            if 45 <= (t3 - t1) <= 75 and pd.notna(vo2_3) and vo2_2 < vo2_1 * 0.97:
+                pct_drop_60 = (vo2_1 - vo2_3) / vo2_1
+                if pct_drop_60 > pct_drop:
+                    pct_drop = pct_drop_60
+        drops.append((t1, pct_drop, vo2_1))
+    candidate_drops = [d for d in drops if d[1] > 0.15 and d[0] > 120]
+    candidate_drops.sort(key=lambda x: x[0])
+    grouped_ends = []
+    for d in candidate_drops:
+        t, pct, val = d
+        if not grouped_ends or t - grouped_ends[-1][0] > 90:
+            grouped_ends.append(d)
+        else:
+            if val > grouped_ends[-1][2]:
+                grouped_ends[-1] = d
+    detected_times = [g[0] for g in grouped_ends]
+    detected_times.sort()
+    return [float(x) for x in detected_times[:anzahl]]
+
+
 if uploaded_file is not None and uploaded_file.name != st.session_state.last_uploaded_file:
     st.session_state.last_uploaded_file = uploaded_file.name
     try:
@@ -3563,6 +3596,14 @@ if uploaded_file is not None and uploaded_file.name != st.session_state.last_upl
             detected = detect_spiro_stage_ends(spiro_df, 20)
             if detected:
                 st.session_state.detected_stage_ends = detected
+                if len(detected) >= 2:
+                    med_interval = float(np.median(np.diff(detected)))
+                    if 280.0 <= med_interval <= 380.0:
+                        st.session_state.stufendauer = 5.0
+                        st.session_state.stufendauer_lauft_widget = 5.0
+                    elif 170.0 <= med_interval <= 250.0:
+                        st.session_state.stufendauer = 3.0
+                        st.session_state.stufendauer_lauft_widget = 3.0
             else:
                 if "detected_stage_ends" in st.session_state:
                     del st.session_state.detected_stage_ends
@@ -3689,10 +3730,23 @@ with st.sidebar.expander("Spiro-Fenster Feineinstellung", expanded=False):
         pause_sec = int(st.session_state.pausendauer)
         vorlauf = int(st.session_state.vorlauf)
         interval = stage_sec + pause_sec
+
+        if "detected_stage_ends" not in st.session_state and "lauftest_spiro_df" in st.session_state:
+            _det = detect_spiro_stage_ends(st.session_state.lauftest_spiro_df, 20)
+            if _det:
+                st.session_state.detected_stage_ends = _det
+
+        det_list = st.session_state.get("detected_stage_ends", [])
+        if len(det_list) >= 2:
+            det_interval = int(round(float(np.median(np.diff(det_list)))))
+            if 280 <= det_interval <= 380 or 170 <= det_interval <= 250:
+                interval = det_interval
         
         for i in range(anz):
-            if "detected_stage_ends" in st.session_state and i < len(st.session_state.detected_stage_ends):
-                end_t_base = int(st.session_state.detected_stage_ends[i])
+            if i < len(det_list):
+                end_t_base = int(det_list[i])
+            elif len(det_list) >= 2:
+                end_t_base = int(det_list[-1]) + (i - len(det_list) + 1) * interval
             else:
                 end_t_base = int(vorlauf + (i + 1) * stage_sec + i * pause_sec)
             
@@ -3711,7 +3765,13 @@ with st.sidebar.expander("Spiro-Fenster Feineinstellung", expanded=False):
                 )
                 st.session_state[end_t_key] = new_end_t
             else:
-                calculated_end_t = int(st.session_state["lauftest_end_t_0"]) + i * interval
+                if len(det_list) >= 2 and int(st.session_state["lauftest_end_t_0"]) == int(det_list[0]):
+                    if i < len(det_list):
+                        calculated_end_t = int(det_list[i])
+                    else:
+                        calculated_end_t = int(det_list[-1]) + (i - len(det_list) + 1) * interval
+                else:
+                    calculated_end_t = int(st.session_state["lauftest_end_t_0"]) + i * interval
                 
                 if unregel:
                     if end_t_key not in st.session_state:
@@ -3784,48 +3844,21 @@ elif st.session_state.get("lauf_auswertung_gestartet", False):
 
 # --- HILFSFUNKTIONEN ---
 
-def detect_spiro_stage_ends(df_spiro, anzahl):
-    n_rows = len(df_spiro)
-    if n_rows < 10:
-        return []
-    t_diffs = df_spiro['Time'].diff().dropna()
-    dt = t_diffs.median() if len(t_diffs) > 0 else 10.0
-    step_30s = max(1, int(round(30.0 / dt)))
-    drops = []
-    for i in range(n_rows - step_30s):
-        t1 = df_spiro['Time'].iloc[i]
-        vo2_1 = df_spiro['VO2'].iloc[i]
-        vo2_2 = df_spiro['VO2'].iloc[i + step_30s]
-        t2 = df_spiro['Time'].iloc[i + step_30s]
-        if 20 <= (t2 - t1) <= 45:
-            pct_drop = (vo2_1 - vo2_2) / vo2_1 if vo2_1 > 0 else 0.0
-            drops.append((t1, pct_drop, vo2_1))
-    candidate_drops = [d for d in drops if d[1] > 0.15 and d[0] > 120]
-    candidate_drops.sort(key=lambda x: x[0])
-    grouped_ends = []
-    for d in candidate_drops:
-        t, pct, val = d
-        if not grouped_ends or t - grouped_ends[-1][0] > 90:
-            grouped_ends.append(d)
-        else:
-            if pct > grouped_ends[-1][1]:
-                grouped_ends[-1] = d
-    detected_times = [g[0] for g in grouped_ends]
-    detected_times.sort()
-    return [float(x) for x in detected_times[:anzahl]]
-
 def calculate_vlamax_for_v(v_thresh, rel_vo2max, speed_arr, vo2_steady_abs, vco2_steady_abs, weight):
     if not (rel_vo2max > 0 and v_thresh > 0 and len(vo2_steady_abs) > 0 and weight > 0): 
         return None, None, None
         
     vo2_rest = 3.5 * weight
     re_abs_m_s = []
+    ex_speeds = []
     
-    # Calculate VO2_CHO100 running economy for exercise stages
+    # Calculate VO2_CHO100 running economy ONLY for exercise stages with valid Spiro data
     for v, vo2, vco2 in zip(speed_arr, vo2_steady_abs, vco2_steady_abs):
-        if v <= 0:
+        if v <= 0 or vo2 <= 0:
             continue
         vo2_working = max(0.0, vo2 - vo2_rest)
+        if vo2_working <= 0:
+            continue
         if vo2 > 0 and vco2 > 0:
             rq = vco2 / vo2
         else:
@@ -3833,8 +3866,8 @@ def calculate_vlamax_for_v(v_thresh, rel_vo2max, speed_arr, vo2_steady_abs, vco2
         cal_eq = (rq - 0.7) * 5.094 + 19.6
         vo2_cho100 = vo2_working * cal_eq / 21.1
         re_abs_m_s.append(vo2_cho100 / v)
+        ex_speeds.append(v)
         
-    ex_speeds = [v for v in speed_arr if v > 0]
     if len(re_abs_m_s) == 0 or len(ex_speeds) == 0:
         return None, None, None
         
@@ -4121,11 +4154,11 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
             carb_intake_rate = 45.0  # g/h
             vo2_rest = 3.5 * weight
 
-            # 1. Compute AC for each stage
+            # 1. Compute AC for each stage with valid Spiro data
+            ex_speeds = []
             ac_stages = []
             for v, vo2, vco2 in zip(speed, vo2_steady_abs, vco2_steady_abs):
                 if v <= 0 or vo2 <= 0:
-                    ac_stages.append(0.0)
                     continue
                 net_vo2 = max(0.0, vo2 - vo2_rest)
                 rq = vco2 / vo2 if vco2 > 0 else 0.85
@@ -4133,9 +4166,8 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
                 ee_kJ_min = (net_vo2 / 1000.0) * kal_equiv
                 vo2_100kh = ee_kJ_min / 21.1 * 1000.0
                 ac = vo2_100kh / (v * 100.0)
+                ex_speeds.append(float(v))
                 ac_stages.append(ac)
-
-            ex_speeds = [v for v in speed if v > 0]
             
             if len(ex_speeds) >= 2:
                 v_grid_start = min(2.6, float(ex_speeds[0]))
@@ -4147,10 +4179,11 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
                         c_val = ac_stages[0] - m * ex_speeds[0]
                         ac = m * v + c_val
                     elif v >= ex_speeds[-1]:
-                        m = (ac_stages[-1] - ac_stages[-2]) / (ex_speeds[-1] - ex_speeds[-2])
-                        c_val = ac_stages[-1] - m * ex_speeds[-1]
-                        ac = m * v + c_val
+                        # Entspricht HYCYS Excel Calculation Spirometrie J25:K425:
+                        # ab der letzten gemessenen Spiro-Stufe wird der letzte AC-Wert gehalten (LOOKUP)
+                        ac = ac_stages[-1]
                     else:
+                        ac = ac_stages[-1]
                         for i in range(len(ex_speeds) - 1):
                             if ex_speeds[i] <= v < ex_speeds[i+1]:
                                 m = (ac_stages[i+1] - ac_stages[i]) / (ex_speeds[i+1] - ex_speeds[i])
@@ -4531,11 +4564,11 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
 
         if re_v is not None:
             eco_str = f"{re_v:.1f} ml/kg/km".replace('.', ',')
-        else:
-            eco_str = "-"
-
-        speeds_s3.append(f"{v_ms:.2f} m/s".replace('.', ','))
-        eco_vals_s3.append(eco_str)
+            speeds_s3.append(f"{v_ms:.2f} m/s".replace('.', ','))
+            eco_vals_s3.append(eco_str)
+        elif len(vo2_steady_abs) == 0:
+            speeds_s3.append(f"{v_ms:.2f} m/s".replace('.', ','))
+            eco_vals_s3.append("-")
         
     for i in range(len(speeds_s3)):
         y_coord = y_coords_s3[i]
@@ -5223,27 +5256,33 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                 spiro_interval_note = f"({spiro_interval_sec}s-Auflösung)"
 
             if not spiro_df.empty:
-                # VO2max Rolling-Window: 40s rolling average (4 points for 10s, 2 points for 30s)
-                # Entspricht der Excel-Auswertungsmethodik (Window=4 @ 10s-Auflösung = 40s)
-                window_pts = max(1, int(40 / spiro_interval_sec))
-                abs_vo2max = spiro_df['VO2'].rolling(window=window_pts, center=True).mean().max()
+                # VO2max Rolling-Window: immer der höchste über 30s gemittelte Wert
+                # (3 Punkte bei 10s-Auflösung = 30s, 1 Punkt bei 30s-Auflösung = 30s)
+                if not separate_ramp:
+                    window_pts = max(1, int(round(30.0 / spiro_interval_sec)))
+                    abs_vo2max = float(spiro_df['VO2'].rolling(window=window_pts, center=True).mean().max())
+                else:
+                    abs_vo2max = 0.0
                 
-                # Wenn Rampe getrennt hochgeladen wurde, VO2max daraus berechnen
+                # Wenn Rampe getrennt hochgeladen wurde, VO2max ausschließlich aus der Rampe
+                # als höchsten über 30s gemittelten Wert berechnen (Stufentest nur für Laufökonomie)
                 if separate_ramp and uploaded_ramp is not None:
                     try:
+                        uploaded_ramp.seek(0)
                         df_ramp_excel = pd.read_csv(uploaded_ramp, header=None, low_memory=False) if uploaded_ramp.name.endswith('.csv') else pd.read_excel(uploaded_ramp, header=None)
                         ramp_times_sec = df_ramp_excel.iloc[3:, 9].apply(parse_time_to_seconds)
                         ramp_vo2_col = pd.to_numeric(df_ramp_excel.iloc[3:, 13], errors='coerce')
-                        ramp_df = pd.DataFrame({'Time': ramp_times_sec, 'VO2': ramp_vo2_col}).dropna(subset=['Time'])
+                        ramp_df = pd.DataFrame({'Time': ramp_times_sec, 'VO2': ramp_vo2_col}).dropna(subset=['Time']).reset_index(drop=True)
                         if len(ramp_df) >= 2:
                             r_t_diffs = ramp_df['Time'].diff().dropna()
                             ramp_interval_sec = int(round(r_t_diffs.median()))
                         else:
                             ramp_interval_sec = 10
-                        # Rampe: ebenfalls 40s Fenster (wie Stufentest)
-                        ramp_window_pts = max(1, int(40 / ramp_interval_sec))
-                        if not ramp_df.empty:
-                            abs_vo2max = ramp_df['VO2'].rolling(window=ramp_window_pts, center=True).mean().max()
+                        if ramp_interval_sec == 10:
+                            spiro_interval_note = ""
+                        if not ramp_df.empty and ramp_df['VO2'].notna().any():
+                            ramp_window_pts = max(1, int(round(30.0 / ramp_interval_sec)))
+                            abs_vo2max = float(ramp_df['VO2'].rolling(window=ramp_window_pts, center=True).mean().max())
                     except Exception as e:
                         st.error(f"Fehler beim Auslesen der Rampendatei: {e}")
 
@@ -5254,6 +5293,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                 vorlauf = st.session_state.get("vorlauf", 60)
                 stage_sec = int(stufendauer * 60)
                 pause_sec = int(pausendauer)
+                max_spiro_t = float(spiro_df['Time'].max()) if not spiro_df.empty else 0.0
                 for i in range(anzahl):
                     if "detected_stage_ends" in st.session_state and i < len(st.session_state.detected_stage_ends):
                         end_t_base = st.session_state.detected_stage_ends[i]
@@ -5264,11 +5304,21 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     end_t = float(end_t_val)
                     start_t = end_t - steady_fenster
                     
-                    mask = (spiro_df['Time'] > start_t) & (spiro_df['Time'] <= end_t)
-                    window_coords.append((start_t, end_t))
-                    stage_data = spiro_df.loc[mask]
-                    vo2_val  = stage_data['VO2'].mean()  if not stage_data.empty else 0.0
-                    vco2_val = stage_data['VCO2'].mean() if not stage_data.empty else 0.0
+                    # Prüfen, ob für diese Stufe im Stufentest noch valide Spiro-Daten vorliegen
+                    if start_t >= max_spiro_t or (end_t - max_spiro_t) > max(30.0, float(spiro_interval_sec)):
+                        vo2_val = 0.0
+                        vco2_val = 0.0
+                    else:
+                        mask = (spiro_df['Time'] > start_t) & (spiro_df['Time'] <= end_t)
+                        stage_data = spiro_df.loc[mask]
+                        vo2_val  = float(stage_data['VO2'].mean())  if not stage_data.empty and stage_data['VO2'].notna().any() else 0.0
+                        vco2_val = float(stage_data['VCO2'].mean()) if not stage_data.empty and stage_data['VCO2'].notna().any() else 0.0
+                        # Falls am Ende der Datei nur noch Abbruch/Cooldown-Punkte liegen (VO2 fällt stark ab gegenüber Vorstufe)
+                        if i > 0 and vo2_steady_abs[i - 1] > 0 and vo2_val < 0.80 * vo2_steady_abs[i - 1]:
+                            vo2_val = 0.0
+                            vco2_val = 0.0
+                        else:
+                            window_coords.append((start_t, end_t))
                     vo2_steady_values.append(vo2_val / weight if weight > 0 else 0.0)
                     vo2_steady_abs.append(vo2_val)
                     vco2_steady_abs.append(vco2_val)
@@ -5429,7 +5479,8 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
             vla_display = str(vla_raw).replace('.', ',') if isinstance(vla_raw, (int, float)) else str(vla_raw)
             if pd.notna(vla_raw) and vla_raw != 'N/A' and 'bitte' not in str(vla_raw).lower():
                 try:
-                    vla_val = float(vla_raw)
+                    vla_exact, _, _ = calculate_vlamax_for_v(v_ans, rel_vo2max, speed, vo2_steady_abs, vco2_steady_abs, weight)
+                    vla_val = float(vla_exact) if vla_exact is not None else float(vla_raw)
                 except ValueError:
                     pass
 
@@ -5485,20 +5536,20 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
     if has_spiro_for_fatmax:
         try:
             vo2_rest_fm = 3.5 * weight
+            ex_speeds_fm = []
             ac_stages_fm = []
             for v_s, vo2_s, vco2_s in zip(speed, vo2_steady_abs, vco2_steady_abs):
                 if v_s <= 0 or vo2_s <= 0:
-                    ac_stages_fm.append(0.0)
                     continue
                 net_vo2_s = max(0.0, vo2_s - vo2_rest_fm)
                 rq_s = vco2_s / vo2_s if vco2_s > 0 else 0.85
                 kal_equiv_s = (rq_s - 0.7) * 5.094 + 19.6
                 ee_kJ_min_s = (net_vo2_s / 1000.0) * kal_equiv_s
                 vo2_100kh_s = ee_kJ_min_s / 21.1 * 1000.0
+                ex_speeds_fm.append(float(v_s))
                 ac_stages_fm.append(vo2_100kh_s / (v_s * 100.0))
-            ex_speeds_fm = [v_s for v_s in speed if v_s > 0]
             if len(ex_speeds_fm) >= 2:
-                v_grid_fm = np.arange(2.6, 8.61, 0.01)
+                v_grid_fm = np.arange(min(2.6, float(ex_speeds_fm[0])), 8.61, 0.01)
                 ac_grid_fm = []
                 for v_g in v_grid_fm:
                     if v_g <= ex_speeds_fm[0]:
@@ -5506,9 +5557,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                         c_fm = ac_stages_fm[0] - m_fm * ex_speeds_fm[0]
                         ac_g = m_fm * v_g + c_fm
                     elif v_g >= ex_speeds_fm[-1]:
-                        m_fm = (ac_stages_fm[-1] - ac_stages_fm[-2]) / (ex_speeds_fm[-1] - ex_speeds_fm[-2])
-                        c_fm = ac_stages_fm[-1] - m_fm * ex_speeds_fm[-1]
-                        ac_g = m_fm * v_g + c_fm
+                        ac_g = ac_stages_fm[-1]
                     else:
                         ac_g = ac_stages_fm[-1]
                         for idx_fm in range(len(ex_speeds_fm) - 1):
@@ -5584,10 +5633,10 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
     if has_spiro:
         try:
             vo2_rest = 3.5 * weight
+            ex_speeds = []
             ac_stages = []
             for v, vo2, vco2 in zip(speed, vo2_steady_abs, vco2_steady_abs):
                 if v <= 0 or vo2 <= 0:
-                    ac_stages.append(0.0)
                     continue
                 net_vo2 = max(0.0, vo2 - vo2_rest)
                 rq = vco2 / vo2 if vco2 > 0 else 0.85
@@ -5595,9 +5644,9 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                 ee_kJ_min = (net_vo2 / 1000.0) * kal_equiv
                 vo2_100kh = ee_kJ_min / 21.1 * 1000.0
                 ac = vo2_100kh / (v * 100.0)
+                ex_speeds.append(float(v))
                 ac_stages.append(ac)
 
-            ex_speeds = [v for v in speed if v > 0]
             if len(ex_speeds) >= 2:
                 v_grid_start = min(2.6, float(ex_speeds[0]))
                 v_grid = np.arange(v_grid_start, 8.61, 0.01)
@@ -5608,10 +5657,9 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                         c_val = ac_stages[0] - m * ex_speeds[0]
                         ac = m * v + c_val
                     elif v >= ex_speeds[-1]:
-                        m = (ac_stages[-1] - ac_stages[-2]) / (ex_speeds[-1] - ex_speeds[-2])
-                        c_val = ac_stages[-1] - m * ex_speeds[-1]
-                        ac = m * v + c_val
+                        ac = ac_stages[-1]
                     else:
+                        ac = ac_stages[-1]
                         for i in range(len(ex_speeds) - 1):
                             if ex_speeds[i] <= v < ex_speeds[i+1]:
                                 m = (ac_stages[i+1] - ac_stages[i]) / (ex_speeds[i+1] - ex_speeds[i])
@@ -5937,8 +5985,8 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
         v_hi_ener = float(speed[-1]) if len(speed) > 0 else 4.5
         v_grid_ener = np.arange(min(2.6, v_lo_ener), max(6.5, v_hi_ener + 0.5), 0.02)
 
-        if has_spiro and 'ac_stages' in locals() and len(ac_stages) >= 2:
-            ex_sp_ener = [v for v in speed if v > 0]
+        if has_spiro and 'ac_stages' in locals() and 'ex_speeds' in locals() and len(ac_stages) >= 2:
+            ex_sp_ener = ex_speeds
             ac_grid_ener = []
             for vg in v_grid_ener:
                 if vg <= ex_sp_ener[0]:
@@ -5946,9 +5994,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     c_e = ac_stages[0] - m_e * ex_sp_ener[0]
                     ac_grid_ener.append(m_e * vg + c_e)
                 elif vg >= ex_sp_ener[-1]:
-                    m_e = (ac_stages[-1] - ac_stages[-2]) / (ex_sp_ener[-1] - ex_sp_ener[-2])
-                    c_e = ac_stages[-1] - m_e * ex_sp_ener[-1]
-                    ac_grid_ener.append(m_e * vg + c_e)
+                    ac_grid_ener.append(ac_stages[-1])
                 else:
                     ac_val_e = ac_stages[-1]
                     for idx_e in range(len(ex_sp_ener) - 1):
@@ -6219,7 +6265,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
             with col_lt:
                 st.markdown("**Messwerte & Potenzial je Stufe**")
                 display_records = []
-                for r in lauf_rows:
+                for r in valid_rows:
                     re_ist_v = r['re_l_km']
                     re_pot_v = (re_ist_v * re_pot_factor) if re_ist_v is not None else None
                     row_dict = {

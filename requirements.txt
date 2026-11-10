@@ -9,3 +9,6 @@ fitparse
 pwlf
 scipy
 pillow
+google-api-python-client
+google-auth
+google-auth-oauthlib
