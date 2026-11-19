@@ -1382,6 +1382,210 @@ def calc_pot_weight_from_bf(
     return float(weight_ist * (numer / denom))
 
 
+def compute_galibier_v2_cycling(
+    p_vals: np.ndarray,
+    weight: float,
+    rel_vo2max: float,
+    vlamax: float,
+    carb_intake_g_h: float = 90.0,
+    km_val: float = 0.21,
+    km_low: float = 0.15,
+    km_high: float = 0.28,
+    eta: float = 0.239,
+    vo2_rest: float = 3.5,
+) -> dict:
+    """
+    Version 2 (Galibier v4.2) für Radsport:
+      - Ruhe-VO2 = 3,5 mL/kg/min (1 MET)
+      - Konstanter Nettowirkungsgrad eta = 23,9 % (mechanische Leistung / Energieumsatz über Ruhe)
+      - Substratabhängiges kalorisches Äquivalent AE = 19,6 * f_Fett + 21,1 * f_KH [kJ/L O2]
+        => O2-Kosten variieren mit Substrat (~12,8 mL/min/W bei reinem Fett, ~11,9 bei reinem KH, ~12,0 am MLSS)
+      - Michaelis-Menten PDH-Sättigung aus r = VLass / VLaoxmax:
+        f_KH = r / (r + Km), f_Fett = Km / (r + Km) mit Km = 0,21 (Range: 0,15 - 0,28)
+    """
+    ks1, ks2, la_eq, vol_dist = 0.0631, 1.331, 0.02049, 0.4
+    p_arr = np.asarray(p_vals, dtype=float)
+    if weight <= 0 or rel_vo2max <= vo2_rest + 1.0:
+        z = np.zeros_like(p_arr)
+        return {
+            "ee_tot": z, "ee_fat": z, "fat_g": z, "kh_kcal": z, "kh_g": z,
+            "fat_pct": z, "kh_pct": z,
+            "ee_fat_low": z, "ee_fat_high": z, "kh_g_low": z, "kh_g_high": z,
+            "mlss_power": 0, "fatmax_power": 0, "carb_match_power": 0,
+            "carb_match_kh_g": 0.0, "carb_match_fat_g": 0.0, "carb_match_ee_ges": 0.0,
+        }
+
+    vo2_grid = np.linspace(vo2_rest + 0.01, rel_vo2max - 0.02, 4000)
+    adp = np.sqrt((ks1 * vo2_grid) / (rel_vo2max - vo2_grid))
+    vlass = (60.0 * max(0.10, float(vlamax))) / (1.0 + ks2 / (adp ** 3))
+    vlaox = (la_eq / vol_dist) * vo2_grid
+    r_grid = np.maximum(0.0, vlass / np.maximum(1e-9, vlaox))
+
+    def _eval_km(km_c: float):
+        f_kh = r_grid / (r_grid + km_c)
+        f_fat = km_c / (r_grid + km_c)
+        ae = 19.6 * f_fat + 21.1 * f_kh
+        e_net_kj_min = ((vo2_grid - vo2_rest) * weight / 1000.0) * ae
+        p_grid = (e_net_kj_min * eta) / 0.06
+        ee_tot_grid = ((vo2_grid * weight / 1000.0) * ae / 4.186) * 60.0
+        ee_fat_grid = ee_tot_grid * f_fat
+        ee_kh_grid = ee_tot_grid * f_kh
+        kh_g_grid = ee_kh_grid / 4.063
+        return p_grid, ee_tot_grid, ee_fat_grid, ee_kh_grid, kh_g_grid, f_fat * 100.0, f_kh * 100.0
+
+    p_g, ee_tot_g, ee_fat_g, ee_kh_g, kh_g_g, fat_pct_g, kh_pct_g = _eval_km(km_val)
+    p_g_lo, _, ee_fat_g_lo, _, kh_g_g_lo, _, _ = _eval_km(km_low)
+    p_g_hi, _, ee_fat_g_hi, _, kh_g_g_hi, _, _ = _eval_km(km_high)
+
+    ee_tot = np.interp(p_arr, p_g, ee_tot_g)
+    ee_fat = np.interp(p_arr, p_g, ee_fat_g)
+    kh_kcal = np.interp(p_arr, p_g, ee_kh_g)
+    kh_g = np.interp(p_arr, p_g, kh_g_g)
+    fat_g = ee_fat / 9.3
+    fat_pct = np.interp(p_arr, p_g, fat_pct_g)
+    kh_pct = np.interp(p_arr, p_g, kh_pct_g)
+
+    # Km = 0.15 -> höherer KH-Anteil, niedrigerer Fett-Anteil; Km = 0.28 -> niedrigerer KH-Anteil, höherer Fett-Anteil
+    ee_fat_low = np.interp(p_arr, p_g_lo, ee_fat_g_lo)
+    ee_fat_high = np.interp(p_arr, p_g_hi, ee_fat_g_hi)
+    kh_g_high = np.interp(p_arr, p_g_lo, kh_g_g_lo)
+    kh_g_low = np.interp(p_arr, p_g_hi, kh_g_g_hi)
+
+    idx_mlss = int(np.argmin(np.abs(r_grid - 1.0)))
+    mlss_power = int(round(float(p_g[idx_mlss])))
+    idx_fm = int(np.argmax(ee_fat_g))
+    fatmax_power = int(round(float(p_g[idx_fm])))
+
+    le_mask = kh_g_g <= carb_intake_g_h
+    if np.any(le_mask):
+        idx_khm = int(np.where(le_mask)[0][-1])
+    else:
+        idx_khm = int(np.argmin(np.abs(kh_g_g - carb_intake_g_h)))
+    carb_match_power = int(round(float(p_g[idx_khm])))
+    carb_match_kh_g = float(kh_g_g[idx_khm])
+    carb_match_fat_g = float(ee_fat_g[idx_khm] / 9.3)
+    carb_match_ee_ges = float(ee_tot_g[idx_khm])
+
+    return {
+        "ee_tot": ee_tot,
+        "ee_fat": ee_fat,
+        "fat_g": fat_g,
+        "kh_kcal": kh_kcal,
+        "kh_g": kh_g,
+        "fat_pct": fat_pct,
+        "kh_pct": kh_pct,
+        "ee_fat_low": ee_fat_low,
+        "ee_fat_high": ee_fat_high,
+        "kh_g_low": kh_g_low,
+        "kh_g_high": kh_g_high,
+        "mlss_power": mlss_power,
+        "fatmax_power": fatmax_power,
+        "carb_match_power": carb_match_power,
+        "carb_match_kh_g": carb_match_kh_g,
+        "carb_match_fat_g": carb_match_fat_g,
+        "carb_match_ee_ges": carb_match_ee_ges,
+    }
+
+
+def compute_galibier_v2_running(
+    v_grid: np.ndarray,
+    vo2_rel_dem_v1: np.ndarray,
+    weight: float,
+    rel_vo2max: float,
+    vlamax: float,
+    carb_intake_g_h: float = 90.0,
+    km_val: float = 0.21,
+    km_low: float = 0.15,
+    km_high: float = 0.28,
+) -> dict:
+    """
+    Version 2 (Galibier v4.2) übertragen auf das Laufen:
+      - Konstanter Nettowirkungsgrad / konstanter Netto-Energiebedarf pro Meter bei der jeweiligen Geschwindigkeit.
+      - Da Fett weniger Energie pro Liter O2 liefert (19,6 vs. 21,1 kJ/L O2; am MLSS ~20,84 kJ/L O2),
+        variieren die O2-Kosten mit der Substratmischung: VO2_net_V2(v) = VO2_net_V1(v) * (20,84 / AE(r)).
+      - Michaelis-Menten PDH-Sättigung aus r = VLass / VLaoxmax:
+        f_KH = r / (r + Km), f_Fett = Km / (r + Km) mit Km = 0,21 (Range: 0,15 - 0,28).
+    """
+    ks1, ks2, la_eq, vol_dist = 0.0631, 1.331, 0.02049, 0.4
+    v_arr = np.asarray(v_grid, dtype=float)
+    vo2_v1 = np.asarray(vo2_rel_dem_v1, dtype=float)
+    eff_vo2max = float(rel_vo2max if rel_vo2max > 10.0 else 60.0)
+    vla_use = max(0.10, float(vlamax if vlamax > 0 else 0.45))
+
+    def _eval_km_run(km_c: float):
+        # Am MLSS (r=1) beträgt AE_mlss = 19.6 * (km_c/(1+km_c)) + 21.1 * (1/(1+km_c))
+        ae_mlss = 19.6 + 1.5 * (1.0 / (1.0 + km_c))
+        ae_cur = np.full_like(v_arr, ae_mlss, dtype=float)
+        vo2_net_base = np.maximum(0.1, vo2_v1 - 3.5)
+        for _ in range(5):
+            vo2_rel_v2 = vo2_net_base * (ae_mlss / ae_cur) + 3.5
+            d_vo2 = eff_vo2max - vo2_rel_v2
+            valid = (d_vo2 > 0.02) & (vo2_rel_v2 > 0)
+            r_arr = np.full_like(v_arr, 5.0, dtype=float)
+            if np.any(valid):
+                adp = np.sqrt((ks1 * vo2_rel_v2[valid]) / d_vo2[valid])
+                vlass = (60.0 * vla_use) / (1.0 + ks2 / (adp ** 3))
+                vlaox = (la_eq / vol_dist) * vo2_rel_v2[valid]
+                r_arr[valid] = np.maximum(0.0, vlass / np.maximum(1e-9, vlaox))
+            f_kh = r_arr / (r_arr + km_c)
+            f_fat = km_c / (r_arr + km_c)
+            ae_cur = 19.6 * f_fat + 21.1 * f_kh
+
+        ee_tot = (((vo2_rel_v2 * weight / 1000.0) * ae_cur) * 60.0) / 4.186
+        ee_fat = ee_tot * f_fat
+        ee_kh = ee_tot * f_kh
+        kh_g = ee_kh / 4.063
+        fat_g = ee_fat / 9.3
+        return vo2_rel_v2, r_arr, ee_tot, ee_fat, fat_g, ee_kh, kh_g, f_fat * 100.0, f_kh * 100.0
+
+    vo2_v2, r_v2, ee_tot, ee_fat, fat_g, ee_kh, kh_g, fat_pct, kh_pct = _eval_km_run(km_val)
+    _, _, _, ee_fat_lo, _, _, kh_g_hi, _, _ = _eval_km_run(km_low)
+    _, _, _, ee_fat_hi, _, _, kh_g_lo, _, _ = _eval_km_run(km_high)
+
+    sub_mask = (eff_vo2max - vo2_v2) > 0.05
+    if np.any(sub_mask):
+        v_sub = v_arr[sub_mask]
+        r_sub = r_v2[sub_mask]
+        fat_sub = ee_fat[sub_mask]
+        kh_sub = kh_g[sub_mask]
+        ee_sub = ee_tot[sub_mask]
+        v_mlss_v2 = float(v_sub[int(np.argmin(np.abs(r_sub - 1.0)))])
+        v_fatmax_v2 = float(v_sub[int(np.argmax(fat_sub))])
+        le_m = kh_sub <= carb_intake_g_h
+        idx_k = int(np.where(le_m)[0][-1]) if np.any(le_m) else int(np.argmin(np.abs(kh_sub - carb_intake_g_h)))
+        v_khm_v2 = float(v_sub[idx_k])
+        kh_at_m_v2 = float(kh_sub[idx_k])
+        fat_g_at_m_v2 = float(fat_sub[idx_k] / 9.3)
+        ee_at_m_v2 = float(ee_sub[idx_k])
+    else:
+        v_mlss_v2 = float(v_arr[-1])
+        v_fatmax_v2 = float(v_arr[0])
+        v_khm_v2 = float(v_arr[0])
+        kh_at_m_v2 = float(carb_intake_g_h)
+        fat_g_at_m_v2 = 0.0
+        ee_at_m_v2 = 0.0
+
+    return {
+        "ee_tot": ee_tot,
+        "ee_fat": ee_fat,
+        "fat_g": fat_g,
+        "kh_kcal": ee_kh,
+        "kh_g": kh_g,
+        "fat_pct": fat_pct,
+        "kh_pct": kh_pct,
+        "ee_fat_low": ee_fat_lo,
+        "ee_fat_high": ee_fat_hi,
+        "kh_g_low": kh_g_lo,
+        "kh_g_high": kh_g_hi,
+        "v_mlss": v_mlss_v2,
+        "v_fatmax": v_fatmax_v2,
+        "v_kh_match": v_khm_v2,
+        "kh_at_match": kh_at_m_v2,
+        "fat_g_at_match": fat_g_at_m_v2,
+        "ee_at_match": ee_at_m_v2,
+    }
+
+
 def render_ans_coaching_diagrams(
     mode: str,
     weight_ist: float,
@@ -2142,7 +2346,19 @@ elif sportart == "Radsport":
                 
             times_sec = df_spiro_excel.iloc[3:, 9].apply(parse_time_to_seconds)
             vo2_col = pd.to_numeric(df_spiro_excel.iloc[3:, 13], errors='coerce')
-            df_spiro_data = pd.DataFrame({'Time': times_sec, 'VO2': vo2_col}).dropna(subset=['Time', 'VO2'])
+            vco2_col = pd.to_numeric(df_spiro_excel.iloc[3:, 14], errors='coerce') if df_spiro_excel.shape[1] > 14 else pd.Series(np.nan, index=df_spiro_excel.iloc[3:].index)
+            eeh_col = pd.to_numeric(df_spiro_excel.iloc[3:, 36], errors='coerce') if df_spiro_excel.shape[1] > 36 else pd.Series(np.nan, index=df_spiro_excel.iloc[3:].index)
+            fett_kcal_h_col = (pd.to_numeric(df_spiro_excel.iloc[3:, 41], errors='coerce') / 24.0) if df_spiro_excel.shape[1] > 41 else pd.Series(np.nan, index=df_spiro_excel.iloc[3:].index)
+            kh_g_h_col = ((pd.to_numeric(df_spiro_excel.iloc[3:, 42], errors='coerce') / 24.0) / 4.063) if df_spiro_excel.shape[1] > 42 else pd.Series(np.nan, index=df_spiro_excel.iloc[3:].index)
+            df_spiro_data = pd.DataFrame({
+                'Time': times_sec,
+                'VO2': vo2_col,
+                'VCO2': vco2_col,
+                'EEh': eeh_col,
+                'FETT_kcal_h': fett_kcal_h_col,
+                'KH_g_h': kh_g_h_col,
+            }).dropna(subset=['Time', 'VO2'])
+            st.session_state.rad_spiro_df = df_spiro_data
             if len(df_spiro_data) >= 2:
                 t_diffs = df_spiro_data['Time'].diff().dropna()
                 interval = int(round(t_diffs.median()))
@@ -2961,7 +3177,92 @@ elif sportart == "Radsport":
 
         # Fett & Kohlenhydrat Stoffwechsel (links, 2/3 Größe) + KH-Match (rechts daneben) – einheitlich wie beim Laufen
         st.markdown("---")
+        max_x_plot = int(min(600, max(300, np.ceil((ans_power + 50) / 10.0) * 10.0)))
+        df_plot_rad = df_sim[df_sim['power'] <= max_x_plot].dropna(subset=['ee_gesamt']).copy()
+        p_vals_r = df_plot_rad['power'].values if not df_plot_rad.empty else np.arange(0, max_x_plot + 1, dtype=float)
+        galibier_rad = compute_galibier_v2_cycling(
+            p_vals=p_vals_r,
+            weight=float(weight),
+            rel_vo2max=float(rel_vo2max),
+            vlamax=float(vlamax),
+            carb_intake_g_h=float(carb_intake),
+            km_val=0.21,
+            km_low=0.15,
+            km_high=0.28,
+            eta=0.239,
+            vo2_rest=3.5,
+        )
+
+        # Gemessene Spiro-Werte für Radsport aufbereiten (falls Spirodatei hochgeladen)
+        rad_spiro_p_meas = []
+        rad_spiro_fett_meas = []
+        rad_spiro_kh_meas = []
+        _df_sp_rad = st.session_state.get("rad_spiro_df", pd.DataFrame())
+        if (_df_sp_rad is None or _df_sp_rad.empty or "FETT_kcal_h" not in _df_sp_rad.columns) and uploaded_spiro is not None:
+            try:
+                uploaded_spiro.seek(0)
+                _df_sp_ex = pd.read_csv(uploaded_spiro, header=None, low_memory=False) if str(uploaded_spiro.name).lower().endswith(".csv") else pd.read_excel(uploaded_spiro, header=None)
+                uploaded_spiro.seek(0)
+                _df_sp_rad = pd.DataFrame({
+                    "Time": _df_sp_ex.iloc[3:, 9].apply(parse_time_to_seconds),
+                    "VO2": pd.to_numeric(_df_sp_ex.iloc[3:, 13], errors="coerce"),
+                    "VCO2": pd.to_numeric(_df_sp_ex.iloc[3:, 14], errors="coerce") if _df_sp_ex.shape[1] > 14 else np.nan,
+                    "FETT_kcal_h": (pd.to_numeric(_df_sp_ex.iloc[3:, 41], errors="coerce") / 24.0) if _df_sp_ex.shape[1] > 41 else np.nan,
+                    "KH_g_h": ((pd.to_numeric(_df_sp_ex.iloc[3:, 42], errors="coerce") / 24.0) / 4.063) if _df_sp_ex.shape[1] > 42 else np.nan,
+                }).dropna(subset=["Time", "VO2"])
+                st.session_state.rad_spiro_df = _df_sp_rad
+            except Exception:
+                _df_sp_rad = pd.DataFrame()
+        if _df_sp_rad is not None and not _df_sp_rad.empty and "VO2" in _df_sp_rad.columns:
+            try:
+                # Nur den ansteigenden Teil bis zum VO2-Peak verwenden
+                _peak_pos = int(_df_sp_rad["VO2"].values.argmax())
+                _df_sp_up = _df_sp_rad.iloc[: max(3, _peak_pos + 1)].copy()
+                _df_sp_up["p_est"] = np.maximum(0.0, (_df_sp_up["VO2"] - float(weight) * float(vo2_rest)) / float(ks4))
+                if "FETT_kcal_h" not in _df_sp_up.columns or _df_sp_up["FETT_kcal_h"].isna().all():
+                    _rq_r = np.clip(_df_sp_up["VCO2"] / _df_sp_up["VO2"], 0.70, 1.00)
+                    _fp_r = (1.0 - _rq_r) / 0.30
+                    _ae_r = (_rq_r - 0.70) * 5.094 + 19.6
+                    _ee_r = (_df_sp_up["VO2"] / 1000.0 * _ae_r * 60.0) / 4.186
+                    _df_sp_up["FETT_kcal_h"] = _ee_r * _fp_r
+                    _df_sp_up["KH_g_h"] = (_ee_r * (1.0 - _fp_r)) / 4.063
+                _df_sp_up = _df_sp_up[(_df_sp_up["p_est"] >= 60.0) & (_df_sp_up["p_est"] <= float(max_x_plot))].dropna(subset=["FETT_kcal_h", "KH_g_h"])
+                if len(_df_sp_up) >= 3:
+                    _df_sp_up["p_bin"] = (np.round(_df_sp_up["p_est"] / 25.0) * 25.0).astype(int)
+                    _grp_sp = _df_sp_up.groupby("p_bin", as_index=False)[["FETT_kcal_h", "KH_g_h"]].mean().sort_values("p_bin")
+                    if len(_grp_sp) >= 2:
+                        rad_spiro_p_meas = list(_grp_sp["p_bin"].astype(float).values)
+                        rad_spiro_fett_meas = list(_grp_sp["FETT_kcal_h"].astype(float).values)
+                        rad_spiro_kh_meas = list(_grp_sp["KH_g_h"].astype(float).values)
+            except Exception:
+                pass
+
         col_rad_chart_u, col_rad_khm_u = st.columns([1.95, 1.05])
+        with col_rad_chart_u:
+            st.markdown("<h3 style='text-align: center; margin-bottom: 6px;'>Fett & Kohlenhydrat Stoffwechsel</h3>", unsafe_allow_html=True)
+            _c_v2_rad, _c_km_rad, _c_sp_rad = st.columns([1.35, 1.05, 1.25])
+            with _c_v2_rad:
+                show_v2_galibier_rad = st.checkbox(
+                    "Version 2 - Galibier (AI Diagnostics) einblenden",
+                    value=False,
+                    key="show_v2_galibier_rad",
+                )
+            with _c_km_rad:
+                show_v2_km_band_rad = st.checkbox(
+                    "Km-Range (0,15–0,28) zeigen",
+                    value=False,
+                    disabled=not show_v2_galibier_rad,
+                    key="show_v2_km_band_rad",
+                )
+            with _c_sp_rad:
+                show_spiro_met_rad = False
+                if len(rad_spiro_p_meas) >= 2:
+                    show_spiro_met_rad = st.checkbox(
+                        "Version 3 - Gemessen Spiro einblenden",
+                        value=False,
+                        key="show_spiro_met_rad",
+                    )
+
         with col_rad_khm_u:
             st.markdown("<h3 style='text-align: center; margin-bottom: 6px;'>KH-Match</h3>", unsafe_allow_html=True)
             kh_sel_rad_u = st.slider(
@@ -2981,7 +3282,7 @@ elif sportart == "Radsport":
                 f"""
                 <div style="border:1px solid #e0e8e8; border-left:5px solid #cdb663; border-radius:6px; padding:14px 16px; background-color:#ffffff; margin-top:6px;">
                     <div style="font-size:12.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase; margin-bottom:10px;">
-                        ⚡ KH-Match bei {int(round(carb_intake))} g KH/h Zufuhr
+                        ⚡ KH-Match bei {int(round(carb_intake))} g KH/h Zufuhr (Version 1 - HYCYS Berechnung (Mader))
                     </div>
                     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; text-align:center;">
                         <div style="background:#f8fafa; padding:10px 8px; border-radius:5px; border:1px solid #edf2f2;">
@@ -3011,13 +3312,43 @@ elif sportart == "Radsport":
                 """,
                 unsafe_allow_html=True,
             )
+            if show_v2_galibier_rad:
+                _v2_khm_p = int(galibier_rad["carb_match_power"])
+                _v2_khm_rel = f"{(_v2_khm_p / weight if weight > 0 else 0.0):.2f}".replace(".", ",")
+                _v2_khm_hr = int(round(_v2_khm_p * slope_val + intercept_val))
+                _v2_fm_p = int(galibier_rad["fatmax_power"])
+                _v2_mlss_p = int(galibier_rad["mlss_power"])
+                _v2_fat_str = f"{galibier_rad['carb_match_fat_g']:.1f}".replace(".", ",")
+                st.markdown(
+                    f"""
+                    <div style="border:1px solid #e0e8e8; border-left:5px solid #1f7a8c; border-radius:6px; padding:10px 14px; background-color:#f8fbfb; margin-top:8px; font-size:12.5px; color:#1a1a1a;">
+                        <div style="font-weight:700; text-transform:uppercase; margin-bottom:6px; color:#1f7a8c;">
+                            Version 2 - Galibier (AI Diagnostics)
+                        </div>
+                        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:6px; text-align:center;">
+                            <div style="background:#ffffff; padding:6px; border-radius:4px; border:1px solid #e6ecec;">
+                                <div style="font-size:10.5px; color:#595a59;">KH-Match (V2)</div>
+                                <div style="font-size:15px; font-weight:800;">{_v2_khm_p} W ({_v2_khm_rel} W/kg)</div>
+                                <div style="font-size:10.5px; color:#d9534f; font-weight:700;">HF: {_v2_khm_hr} bpm | {_v2_fat_str} g/h Fett</div>
+                            </div>
+                            <div style="background:#ffffff; padding:6px; border-radius:4px; border:1px solid #e6ecec;">
+                                <div style="font-size:10.5px; color:#595a59;">Fatmax (V2 vs. V1)</div>
+                                <div style="font-size:15px; font-weight:800; color:#1f7a8c;">{_v2_fm_p} W</div>
+                                <div style="font-size:10.5px; color:#595a59;">V1: {fatmax_power} W</div>
+                            </div>
+                            <div style="background:#ffffff; padding:6px; border-radius:4px; border:1px solid #e6ecec;">
+                                <div style="font-size:10.5px; color:#595a59;">MLSS / ANS (V2 vs. V1)</div>
+                                <div style="font-size:15px; font-weight:800;">{_v2_mlss_p} W</div>
+                                <div style="font-size:10.5px; color:#595a59;">V1: {ans_power} W</div>
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-        max_x_plot = int(min(600, max(300, np.ceil((ans_power + 50) / 10.0) * 10.0)))
         with col_rad_chart_u:
-            st.markdown("<h3 style='text-align: center; margin-bottom: 6px;'>Fett & Kohlenhydrat Stoffwechsel</h3>", unsafe_allow_html=True)
-            df_plot_rad = df_sim[df_sim['power'] <= max_x_plot].dropna(subset=['ee_gesamt']).copy()
             if not df_plot_rad.empty:
-                p_vals_r = df_plot_rad['power'].values
                 ee_tot_r = df_plot_rad['ee_gesamt'].values
                 ee_fat_r = df_plot_rad['ee_fett'].values
                 fat_g_r = ee_fat_r / 9.3
@@ -3042,8 +3373,8 @@ elif sportart == "Radsport":
                     hovertemplate=(
                         "<b>Leistung: %{customdata[0]} W (%{customdata[1]} W/kg)</b><br>"
                         "Gesamtenergie: <b>%{customdata[2]} kcal/h</b><br>"
-                        "Fettstoffwechsel: <b>%{customdata[3]} g/h Fett</b> (%{customdata[4]} kcal/h)<br>"
-                        "Kohlenhydrate: <b>%{customdata[5]} g/h KH</b> (%{customdata[6]} kcal/h)"
+                        "Fett (Version 1 - HYCYS Berechnung (Mader)): <b>%{customdata[3]} g/h Fett</b> (%{customdata[4]} kcal/h)<br>"
+                        "KH (Version 1 - HYCYS Berechnung (Mader)): <b>%{customdata[5]} g/h KH</b> (%{customdata[6]} kcal/h)"
                         "<extra></extra>"
                     ),
                     yaxis='y'
@@ -3052,7 +3383,7 @@ elif sportart == "Radsport":
                     x=p_vals_r, y=ee_fat_r,
                     mode='lines',
                     line=dict(color='#2cb7b9', width=3),
-                    name='Fettstoffwechsel [kcal/h]',
+                    name='Fett: Version 1 - HYCYS Berechnung (Mader) [kcal/h]',
                     hoverinfo='skip',
                     yaxis='y'
                 ))
@@ -3060,10 +3391,118 @@ elif sportart == "Radsport":
                     x=p_vals_r, y=kh_g_r,
                     mode='lines',
                     line=dict(color='#cdb663', width=3),
-                    name='Kohlenhydratverbrauch [g/h]',
+                    name='KH: Version 1 - HYCYS Berechnung (Mader) [g/h]',
                     hoverinfo='skip',
                     yaxis='y2'
                 ))
+
+                # Version 2 - Galibier (AI Diagnostics) Kurven + optionale Km-Range (0.15 - 0.28)
+                if show_v2_galibier_rad:
+                    if show_v2_km_band_rad:
+                        fig_met_u.add_trace(go.Scatter(
+                            x=np.concatenate([p_vals_r, p_vals_r[::-1]]),
+                            y=np.concatenate([galibier_rad["ee_fat_high"], galibier_rad["ee_fat_low"][::-1]]),
+                            fill="toself",
+                            fillcolor="rgba(31, 122, 140, 0.13)",
+                            line=dict(color="rgba(255,255,255,0)"),
+                            hoverinfo="skip",
+                            name="Fett Spannweite: Version 2 - Galibier (AI Diagnostics)",
+                            yaxis="y",
+                        ))
+                        fig_met_u.add_trace(go.Scatter(
+                            x=np.concatenate([p_vals_r, p_vals_r[::-1]]),
+                            y=np.concatenate([galibier_rad["kh_g_high"], galibier_rad["kh_g_low"][::-1]]),
+                            fill="toself",
+                            fillcolor="rgba(184, 134, 11, 0.13)",
+                            line=dict(color="rgba(255,255,255,0)"),
+                            hoverinfo="skip",
+                            name="KH Spannweite: Version 2 - Galibier (AI Diagnostics)",
+                            yaxis="y2",
+                        ))
+
+                    _v2_rad_hover = np.column_stack([
+                        [f"{v:.1f}".replace(".", ",") for v in galibier_rad["fat_g"]],
+                        [f"{int(round(v))}" for v in galibier_rad["ee_fat"]],
+                        [f"{v:.0f}" for v in galibier_rad["fat_pct"]],
+                        [f"{v:.1f}".replace(".", ",") for v in galibier_rad["kh_g"]],
+                        [f"{int(round(v))}" for v in galibier_rad["kh_kcal"]],
+                        [f"{v:.0f}" for v in galibier_rad["kh_pct"]],
+                    ])
+                    fig_met_u.add_trace(go.Scatter(
+                        x=p_vals_r,
+                        y=galibier_rad["ee_fat"],
+                        mode="lines",
+                        line=dict(color="#0d5c75", width=3, dash="dot"),
+                        name="Fett: Version 2 - Galibier (AI Diagnostics) [kcal/h]",
+                        customdata=_v2_rad_hover,
+                        hovertemplate="Fett (Version 2 - Galibier (AI Diagnostics)): <b>%{customdata[0]} g/h Fett</b> (%{customdata[1]} kcal/h · %{customdata[2]} %)<extra></extra>",
+                        yaxis="y",
+                    ))
+                    fig_met_u.add_trace(go.Scatter(
+                        x=p_vals_r,
+                        y=galibier_rad["kh_g"],
+                        mode="lines",
+                        line=dict(color="#b8860b", width=3, dash="dot"),
+                        name="KH: Version 2 - Galibier (AI Diagnostics) [g/h]",
+                        customdata=_v2_rad_hover,
+                        hovertemplate="KH (Version 2 - Galibier (AI Diagnostics)): <b>%{customdata[3]} g/h KH</b> (%{customdata[4]} kcal/h · %{customdata[5]} %)<extra></extra>",
+                        yaxis="y2",
+                    ))
+
+                # Version 3 - Gemessen Spiro Kurven für Radsport
+                if show_spiro_met_rad and len(rad_spiro_p_meas) >= 2:
+                    from scipy.interpolate import PchipInterpolator
+                    _rp_arr = np.array(rad_spiro_p_meas, dtype=float)
+                    _rf_arr = np.array(rad_spiro_fett_meas, dtype=float)
+                    _rk_arr = np.array(rad_spiro_kh_meas, dtype=float)
+                    _rp_u, _ru_idx = np.unique(_rp_arr, return_index=True)
+                    _rf_u = _rf_arr[_ru_idx]
+                    _rk_u = _rk_arr[_ru_idx]
+                    if len(_rp_u) >= 2:
+                        _rp_mask = (p_vals_r >= float(_rp_u[0])) & (p_vals_r <= float(_rp_u[-1]))
+                        _rp_smooth = p_vals_r[_rp_mask] if np.sum(_rp_mask) >= 5 else np.linspace(float(_rp_u[0]), float(_rp_u[-1]), 100)
+                        _rf_smooth = np.clip(PchipInterpolator(_rp_u, _rf_u)(_rp_smooth), 0.0, None)
+                        _rk_smooth = np.clip(PchipInterpolator(_rp_u, _rk_u)(_rp_smooth), 0.0, None)
+                        _rsp_hover = np.column_stack([
+                            [f"{val / 9.3:.1f}".replace(".", ",") for val in _rf_smooth],
+                            [f"{int(round(val))}" for val in _rf_smooth],
+                            [f"{val:.1f}".replace(".", ",") for val in _rk_smooth],
+                            [f"{int(round(val * 4.063))}" for val in _rk_smooth],
+                        ])
+                        fig_met_u.add_trace(go.Scatter(
+                            x=_rp_smooth, y=_rf_smooth,
+                            mode="lines",
+                            line=dict(color="#11696b", width=3, dash="dash"),
+                            name="Fett: Version 3 - Gemessen Spiro [kcal/h]",
+                            customdata=_rsp_hover,
+                            hovertemplate="Fett (Version 3 - Gemessen Spiro): <b>%{customdata[0]} g/h Fett</b> (%{customdata[1]} kcal/h)<extra></extra>",
+                            yaxis="y",
+                        ))
+                        fig_met_u.add_trace(go.Scatter(
+                            x=_rp_u, y=_rf_u,
+                            mode="markers",
+                            marker=dict(symbol="circle", size=7.5, color="#11696b", line=dict(width=1.5, color="#ffffff")),
+                            showlegend=False,
+                            hoverinfo="skip",
+                            yaxis="y",
+                        ))
+                        fig_met_u.add_trace(go.Scatter(
+                            x=_rp_smooth, y=_rk_smooth,
+                            mode="lines",
+                            line=dict(color="#8c7322", width=3, dash="dash"),
+                            name="KH: Version 3 - Gemessen Spiro [g/h]",
+                            customdata=_rsp_hover,
+                            hovertemplate="KH (Version 3 - Gemessen Spiro): <b>%{customdata[2]} g/h KH</b> (%{customdata[3]} kcal/h)<extra></extra>",
+                            yaxis="y2",
+                        ))
+                        fig_met_u.add_trace(go.Scatter(
+                            x=_rp_u, y=_rk_u,
+                            mode="markers",
+                            marker=dict(symbol="circle", size=7.5, color="#8c7322", line=dict(width=1.5, color="#ffffff")),
+                            showlegend=False,
+                            hoverinfo="skip",
+                            yaxis="y2",
+                        ))
                 if 0 < fatmax_power <= int(p_vals_r[-1]):
                     _fm_half_w_r = max(20.0, float(p_vals_r[-1]) * 0.055)
                     _fm_x0_r = max(0.0, float(fatmax_power) - _fm_half_w_r)
@@ -6498,7 +6937,58 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
         else:
             hf_khm_lauf_str = "-"
 
+        galibier_lauf = compute_galibier_v2_running(
+            v_grid=v_grid_ener,
+            vo2_rel_dem_v1=vo2_rel_dem_ener,
+            weight=float(weight),
+            rel_vo2max=float(rel_vo2max),
+            vlamax=float(vla_use_ener),
+            carb_intake_g_h=float(kh_intake_lauf),
+            km_val=0.21,
+            km_low=0.15,
+            km_high=0.28,
+        )
+
+        # Gemessene Stufenwerte aus den Spiro-Rohdaten des Stufentests für die jeweiligen Geschwindigkeiten sammeln
+        spiro_v_meas = []
+        spiro_fett_kcal_meas = []
+        spiro_kh_g_meas = []
+        if has_spiro and len(spiro_fett_steady_kcal_h) > 0:
+            for _idx_sm in range(min(len(speed), len(spiro_fett_steady_kcal_h), len(spiro_kh_steady_g_h))):
+                _v_sm = float(speed[_idx_sm])
+                _f_sm = spiro_fett_steady_kcal_h[_idx_sm]
+                _k_sm = spiro_kh_steady_g_h[_idx_sm]
+                if _v_sm > 0 and pd.notna(_f_sm) and pd.notna(_k_sm):
+                    spiro_v_meas.append(_v_sm)
+                    spiro_fett_kcal_meas.append(float(_f_sm))
+                    spiro_kh_g_meas.append(float(_k_sm))
+
         col_stoff_chart, col_stoff_khm = st.columns([1.95, 1.05])
+        with col_stoff_chart:
+            st.markdown("<h3 style='text-align: center; margin-bottom: 6px;'>Fett & Kohlenhydrat Stoffwechsel</h3>", unsafe_allow_html=True)
+            _c_v2_lauf, _c_km_lauf, _c_sp_lauf = st.columns([1.35, 1.05, 1.25])
+            with _c_v2_lauf:
+                show_v2_galibier_lauf = st.checkbox(
+                    "Version 2 - Galibier (AI Diagnostics) einblenden",
+                    value=False,
+                    key="show_v2_galibier_lauf",
+                )
+            with _c_km_lauf:
+                show_v2_km_band_lauf = st.checkbox(
+                    "Km-Range (0,15–0,28) zeigen",
+                    value=False,
+                    disabled=not show_v2_galibier_lauf,
+                    key="show_v2_km_band_lauf",
+                )
+            with _c_sp_lauf:
+                show_spiro_met_curves = False
+                if len(spiro_v_meas) >= 2:
+                    show_spiro_met_curves = st.checkbox(
+                        "Version 3 - Gemessen Spiro einblenden",
+                        value=False,
+                        key="show_spiro_met_curves_lauf",
+                    )
+
         with col_stoff_khm:
             st.markdown("<h3 style='text-align: center; margin-bottom: 6px;'>KH-Match</h3>", unsafe_allow_html=True)
             kh_sel_lauf = st.slider(
@@ -6517,7 +7007,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                 f"""
                 <div style="border:1px solid #e0e8e8; border-left:5px solid #cdb663; border-radius:6px; padding:14px 16px; background-color:#ffffff; margin-top:6px;">
                     <div style="font-size:12.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase; margin-bottom:10px;">
-                        ⚡ KH-Match bei {int(round(kh_intake_lauf))} g KH/h Zufuhr
+                        ⚡ KH-Match bei {int(round(kh_intake_lauf))} g KH/h Zufuhr (Version 1 - HYCYS Berechnung (Mader))
                     </div>
                     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; text-align:center;">
                         <div style="background:#f8fafa; padding:10px 8px; border-radius:5px; border:1px solid #edf2f2;">
@@ -6547,32 +7037,47 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                 """,
                 unsafe_allow_html=True,
             )
-
-        with col_stoff_chart:
-            st.markdown("<h3 style='text-align: center; margin-bottom: 6px;'>Fett & Kohlenhydrat Stoffwechsel</h3>", unsafe_allow_html=True)
-
-            # Gemessene Stufenwerte aus den Spiro-Rohdaten des Stufentests für die jeweiligen Geschwindigkeiten sammeln
-            spiro_v_meas = []
-            spiro_fett_kcal_meas = []
-            spiro_kh_g_meas = []
-            if has_spiro and len(spiro_fett_steady_kcal_h) > 0:
-                for _idx_sm in range(min(len(speed), len(spiro_fett_steady_kcal_h), len(spiro_kh_steady_g_h))):
-                    _v_sm = float(speed[_idx_sm])
-                    _f_sm = spiro_fett_steady_kcal_h[_idx_sm]
-                    _k_sm = spiro_kh_steady_g_h[_idx_sm]
-                    if _v_sm > 0 and pd.notna(_f_sm) and pd.notna(_k_sm):
-                        spiro_v_meas.append(_v_sm)
-                        spiro_fett_kcal_meas.append(float(_f_sm))
-                        spiro_kh_g_meas.append(float(_k_sm))
-
-            show_spiro_met_curves = False
-            if len(spiro_v_meas) >= 2:
-                show_spiro_met_curves = st.checkbox(
-                    "Gemessenen Fett- & KH-Verbrauch aus Spiro-Rohdaten zum Vergleich einblenden",
-                    value=False,
-                    key="show_spiro_met_curves_lauf",
+            if show_v2_galibier_lauf:
+                _v2_v_khm = float(galibier_lauf["v_kh_match"])
+                _v2_pace_khm = format_pace_mmss(_v2_v_khm)
+                _v2_kmh_khm = f"{_v2_v_khm * 3.6:.1f}".replace(".", ",")
+                if hr_mask_khm.sum() >= 2:
+                    _v2_hf_khm = f"{int(round(hr_slope_khm * _v2_v_khm + hr_intercept_khm, 0))} bpm"
+                else:
+                    _v2_hf_khm = "-"
+                _v2_pace_fm = format_pace_mmss(float(galibier_lauf["v_fatmax"]))
+                _v1_pace_fm = format_pace_mmss(float(v_grid_ener[int(np.argmax(net_cl_ener))]))
+                _v2_pace_mlss = format_pace_mmss(float(galibier_lauf["v_mlss"]))
+                _v2_fat_l_str = f"{galibier_lauf['fat_g_at_match']:.1f}".replace(".", ",")
+                st.markdown(
+                    f"""
+                    <div style="border:1px solid #e0e8e8; border-left:5px solid #1f7a8c; border-radius:6px; padding:10px 14px; background-color:#f8fbfb; margin-top:8px; font-size:12.5px; color:#1a1a1a;">
+                        <div style="font-weight:700; text-transform:uppercase; margin-bottom:6px; color:#1f7a8c;">
+                            Version 2 - Galibier (AI Diagnostics)
+                        </div>
+                        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:6px; text-align:center;">
+                            <div style="background:#ffffff; padding:6px; border-radius:4px; border:1px solid #e6ecec;">
+                                <div style="font-size:10.5px; color:#595a59;">KH-Match (V2)</div>
+                                <div style="font-size:15px; font-weight:800;">{_v2_pace_khm} min/km ({_v2_kmh_khm} km/h)</div>
+                                <div style="font-size:10.5px; color:#d9534f; font-weight:700;">HF: {_v2_hf_khm} | {_v2_fat_l_str} g/h Fett</div>
+                            </div>
+                            <div style="background:#ffffff; padding:6px; border-radius:4px; border:1px solid #e6ecec;">
+                                <div style="font-size:10.5px; color:#595a59;">Fatmax (V2 vs. V1)</div>
+                                <div style="font-size:15px; font-weight:800; color:#1f7a8c;">{_v2_pace_fm} min/km</div>
+                                <div style="font-size:10.5px; color:#595a59;">V1: {_v1_pace_fm} min/km</div>
+                            </div>
+                            <div style="background:#ffffff; padding:6px; border-radius:4px; border:1px solid #e6ecec;">
+                                <div style="font-size:10.5px; color:#595a59;">MLSS / ANS (V2 vs. V1)</div>
+                                <div style="font-size:15px; font-weight:800;">{_v2_pace_mlss} min/km</div>
+                                <div style="font-size:10.5px; color:#595a59;">V1: {ans_pace_str} min/km</div>
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
 
+        with col_stoff_chart:
             v_plot_lo = min(v_lo_ener, max(1.8, v_kh_match_lauf - 0.1))
             valid_ener_mask = (d_vo2_ener > 0) & (v_grid_ener >= v_plot_lo - 1e-6) & (v_grid_ener <= v_hi_ener + 1e-6)
             if np.sum(valid_ener_mask) < 5:
@@ -6614,8 +7119,8 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     hovertemplate=(
                         "<b>Pace: %{customdata[0]} min/km (%{customdata[1]} km/h)</b><br>"
                         "Gesamtenergie: <b>%{customdata[2]} kcal/h</b><br>"
-                        "Fettstoffwechsel: <b>%{customdata[3]} g/h Fett</b> (%{customdata[4]} kcal/h)<br>"
-                        "Kohlenhydrate: <b>%{customdata[5]} g/h KH</b> (%{customdata[6]} kcal/h)"
+                        "Fett (Version 1 - HYCYS Berechnung (Mader)): <b>%{customdata[3]} g/h Fett</b> (%{customdata[4]} kcal/h)<br>"
+                        "KH (Version 1 - HYCYS Berechnung (Mader)): <b>%{customdata[5]} g/h KH</b> (%{customdata[6]} kcal/h)"
                         "<extra></extra>"
                     ),
                     yaxis="y",
@@ -6629,7 +7134,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     y=fat_kcal_vis_e,
                     mode="lines",
                     line=dict(color="#2cb7b9", width=3),
-                    name="Fettstoffwechsel [kcal/h]",
+                    name="Fett: Version 1 - HYCYS Berechnung (Mader) [kcal/h]",
                     hoverinfo="skip",
                     yaxis="y",
                 )
@@ -6642,13 +7147,85 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     y=kh_g_vis_e,
                     mode="lines",
                     line=dict(color="#cdb663", width=3),
-                    name="Kohlenhydratverbrauch [g/h]",
+                    name="KH: Version 1 - HYCYS Berechnung (Mader) [g/h]",
                     hoverinfo="skip",
                     yaxis="y2",
                 )
             )
 
-            # Optionale Vergleichskurven: Gemessener Fett- & KH-Verbrauch aus den Spiro-Rohdaten des Stufentests
+            # Optionale Kurven: Version 2 - Galibier (AI Diagnostics)
+            if show_v2_galibier_lauf:
+                _v2_fat_vis = galibier_lauf["ee_fat"][valid_ener_mask]
+                _v2_fat_g_vis = galibier_lauf["fat_g"][valid_ener_mask]
+                _v2_fat_pct_vis = galibier_lauf["fat_pct"][valid_ener_mask]
+                _v2_kh_g_vis = galibier_lauf["kh_g"][valid_ener_mask]
+                _v2_kh_kcal_vis = galibier_lauf["kh_kcal"][valid_ener_mask]
+                _v2_kh_pct_vis = galibier_lauf["kh_pct"][valid_ener_mask]
+
+                if show_v2_km_band_lauf:
+                    _v2_fat_lo_vis = galibier_lauf["ee_fat_low"][valid_ener_mask]
+                    _v2_fat_hi_vis = galibier_lauf["ee_fat_high"][valid_ener_mask]
+                    _v2_kh_lo_vis = galibier_lauf["kh_g_low"][valid_ener_mask]
+                    _v2_kh_hi_vis = galibier_lauf["kh_g_high"][valid_ener_mask]
+                    fig_stoff.add_trace(
+                        go.Scatter(
+                            x=np.concatenate([v_vis_e, v_vis_e[::-1]]),
+                            y=np.concatenate([_v2_fat_hi_vis, _v2_fat_lo_vis[::-1]]),
+                            fill="toself",
+                            fillcolor="rgba(31, 122, 140, 0.13)",
+                            line=dict(color="rgba(255,255,255,0)"),
+                            hoverinfo="skip",
+                            name="Fett Spannweite: Version 2 - Galibier (AI Diagnostics)",
+                            yaxis="y",
+                        )
+                    )
+                    fig_stoff.add_trace(
+                        go.Scatter(
+                            x=np.concatenate([v_vis_e, v_vis_e[::-1]]),
+                            y=np.concatenate([_v2_kh_hi_vis, _v2_kh_lo_vis[::-1]]),
+                            fill="toself",
+                            fillcolor="rgba(184, 134, 11, 0.13)",
+                            line=dict(color="rgba(255,255,255,0)"),
+                            hoverinfo="skip",
+                            name="KH Spannweite: Version 2 - Galibier (AI Diagnostics)",
+                            yaxis="y2",
+                        )
+                    )
+
+                _v2_lauf_hover = np.column_stack([
+                    [f"{v:.1f}".replace(".", ",") for v in _v2_fat_g_vis],
+                    [f"{int(round(v))}" for v in _v2_fat_vis],
+                    [f"{v:.0f}" for v in _v2_fat_pct_vis],
+                    [f"{v:.1f}".replace(".", ",") for v in _v2_kh_g_vis],
+                    [f"{int(round(v))}" for v in _v2_kh_kcal_vis],
+                    [f"{v:.0f}" for v in _v2_kh_pct_vis],
+                ])
+                fig_stoff.add_trace(
+                    go.Scatter(
+                        x=v_vis_e,
+                        y=_v2_fat_vis,
+                        mode="lines",
+                        line=dict(color="#0d5c75", width=3, dash="dot"),
+                        name="Fett: Version 2 - Galibier (AI Diagnostics) [kcal/h]",
+                        customdata=_v2_lauf_hover,
+                        hovertemplate="Fett (Version 2 - Galibier (AI Diagnostics)): <b>%{customdata[0]} g/h Fett</b> (%{customdata[1]} kcal/h · %{customdata[2]} %)<extra></extra>",
+                        yaxis="y",
+                    )
+                )
+                fig_stoff.add_trace(
+                    go.Scatter(
+                        x=v_vis_e,
+                        y=_v2_kh_g_vis,
+                        mode="lines",
+                        line=dict(color="#b8860b", width=3, dash="dot"),
+                        name="KH: Version 2 - Galibier (AI Diagnostics) [g/h]",
+                        customdata=_v2_lauf_hover,
+                        hovertemplate="KH (Version 2 - Galibier (AI Diagnostics)): <b>%{customdata[3]} g/h KH</b> (%{customdata[4]} kcal/h · %{customdata[5]} %)<extra></extra>",
+                        yaxis="y2",
+                    )
+                )
+
+            # Optionale Vergleichskurven: Version 3 - Gemessen Spiro
             if show_spiro_met_curves and len(spiro_v_meas) >= 2:
                 from scipy.interpolate import PchipInterpolator
                 _sp_order = np.argsort(spiro_v_meas)
@@ -6689,9 +7266,9 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                             y=_sp_f_smooth,
                             mode="lines",
                             line=dict(color="#11696b", width=3, dash="dash"),
-                            name="Fett gemessen (Spiro) [kcal/h]",
+                            name="Fett: Version 3 - Gemessen Spiro [kcal/h]",
                             customdata=_sp_custom_smooth,
-                            hovertemplate="Fett gemessen (Spiro): <b>%{customdata[0]} g/h Fett</b> (%{customdata[1]} kcal/h)<extra></extra>",
+                            hovertemplate="Fett (Version 3 - Gemessen Spiro): <b>%{customdata[0]} g/h Fett</b> (%{customdata[1]} kcal/h)<extra></extra>",
                             yaxis="y",
                         )
                     )
@@ -6701,9 +7278,9 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                             y=_sp_f_unique,
                             mode="markers",
                             marker=dict(symbol="circle", size=8, color="#11696b", line=dict(width=1.5, color="#ffffff")),
-                            name="Fett Stufenwert (Spiro)",
+                            name="Fett Stufenwert (Version 3 - Gemessen Spiro)",
                             customdata=_sp_custom_pts,
-                            hovertemplate="Stufe %{customdata[0]} min/km (%{customdata[1]} km/h)<br>Fett (Spiro): <b>%{customdata[2]} g/h</b> (%{customdata[3]} kcal/h)<extra></extra>",
+                            hovertemplate="Stufe %{customdata[0]} min/km (%{customdata[1]} km/h)<br>Fett (Version 3 - Gemessen Spiro): <b>%{customdata[2]} g/h</b> (%{customdata[3]} kcal/h)<extra></extra>",
                             showlegend=False,
                             yaxis="y",
                         )
@@ -6716,9 +7293,9 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                             y=_sp_k_smooth,
                             mode="lines",
                             line=dict(color="#8c7322", width=3, dash="dash"),
-                            name="KH gemessen (Spiro) [g/h]",
+                            name="KH: Version 3 - Gemessen Spiro [g/h]",
                             customdata=_sp_custom_smooth,
-                            hovertemplate="KH gemessen (Spiro): <b>%{customdata[2]} g/h KH</b> (%{customdata[3]} kcal/h)<extra></extra>",
+                            hovertemplate="KH (Version 3 - Gemessen Spiro): <b>%{customdata[2]} g/h KH</b> (%{customdata[3]} kcal/h)<extra></extra>",
                             yaxis="y2",
                         )
                     )
@@ -6728,9 +7305,9 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                             y=_sp_k_unique,
                             mode="markers",
                             marker=dict(symbol="circle", size=8, color="#8c7322", line=dict(width=1.5, color="#ffffff")),
-                            name="KH Stufenwert (Spiro)",
+                            name="KH Stufenwert (Version 3 - Gemessen Spiro)",
                             customdata=_sp_custom_pts,
-                            hovertemplate="Stufe %{customdata[0]} min/km (%{customdata[1]} km/h)<br>KH (Spiro): <b>%{customdata[4]} g/h</b> (%{customdata[5]} kcal/h)<extra></extra>",
+                            hovertemplate="Stufe %{customdata[0]} min/km (%{customdata[1]} km/h)<br>KH (Version 3 - Gemessen Spiro): <b>%{customdata[4]} g/h</b> (%{customdata[5]} kcal/h)<extra></extra>",
                             showlegend=False,
                             yaxis="y2",
                         )
