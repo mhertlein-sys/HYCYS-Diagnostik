@@ -251,12 +251,26 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
     draw_text_centered(57.12 + 454.92 / 2.0, 381.8 + 1.0, "Interaktion Laktatauf- & abbau",
                        size=8.2, font_style='B', color=c_white)
 
-    max_x = float(np.ceil((ans_power + 10.0) / 25.0) * 25.0)
-    fig, ax = plt.subplots(figsize=(7.4286, 3.6), dpi=300)
+    plt.rcParams["mathtext.default"] = "bf"
+
+    # X-Achse etwas weiter laufen lassen als die goldene Kurve (Laktatproduktion -> 5,0 mmol/L/min), z. B. bei Ina bis 250 W
+    try:
+        _df_vlass_ok = df_sim.dropna(subset=['vlass'])
+        _df_under_5 = _df_vlass_ok[_df_vlass_ok['vlass'] <= 5.0]
+        _p_gold_top = float(_df_under_5['power'].max()) if not _df_under_5.empty else float(ans_power + 20.0)
+    except Exception:
+        _p_gold_top = float(ans_power + 20.0)
+    max_x = float(max(
+        np.ceil((_p_gold_top + 10.0) / 25.0) * 25.0,
+        np.ceil((float(ans_power) + 25.0) / 25.0) * 25.0,
+        150.0,
+    ))
+
+    fig, ax = plt.subplots(figsize=(7.4286, 3.65), dpi=300)
     ax.plot(df_sim['power'], df_sim['vo2ss'] * weight,
-            color='#595a59', linewidth=2.5, label='Sauerstoffaufnahme - VO₂')
-    ax.set_ylabel('VO₂ [ml/min]', color='#595a59', fontsize=7, fontweight='bold')
-    ax.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
+            color='#595a59', linewidth=2.5, label=r'Sauerstoffaufnahme - $\mathbf{VO_2}$')
+    ax.set_ylabel(r'$\mathbf{VO_2}$ [ml/min]', color='#595a59', fontsize=7.5, fontweight='bold')
+    ax.tick_params(axis='y', labelcolor='#595a59', labelsize=6.5, width=1.2)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(
         lambda v, _: f"{int(v):,}".replace(",", ".")))
     ax.set_ylim(500, 5500)
@@ -267,10 +281,12 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
     ax2 = ax.twinx()
     ax2.plot(df_sim['power'], df_sim['vlass'],    color='#cdb663', linewidth=2.5, label='Laktatproduktion')
     ax2.plot(df_sim['power'], df_sim['vlaoxmax'], color='#2cb7b9', linewidth=2.5, label='Laktatabbau')
-    ax2.set_ylabel('Laktatkinetik [mmol/L/min]', color='#595a59', fontsize=7, fontweight='bold')
-    ax2.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
+    ax2.set_ylabel('Laktatkinetik [mmol/L/min]', color='#2cb7b9', fontsize=7.5, fontweight='bold')
+    ax2.tick_params(axis='y', labelcolor='#595a59', labelsize=6.5, width=1.2)
     ax2.set_ylim(0, 5.0)
     ax2.set_yticks(np.arange(0, 5.1, 0.5))
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(
+        lambda v, _: f"{v:.1f}".replace(".", ",")))
 
     # Bold tick labels
     for label in ax.get_xticklabels(): label.set_weight('bold')
@@ -285,32 +301,89 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
         spine.set_color('#595a59')
         spine.set_linewidth(1.2)
 
-    # Shade max Pyruvatdefizit zone
+    # Shade max Pyruvatdefizit zone (1:1 wie im Original-HYCYS-PDF: türkiser Balken mit Rahmen & gleich großer Schrift)
     try:
         if fatmax_power > 0:
-            ax2.axvspan(fatmax_power - 17.5, fatmax_power + 17.5, color='#2cb7b9', alpha=0.2)
-            ax2.text(fatmax_power, 2.5, "max.\nPyruvat-\ndefizit", color='white', fontsize=5.5, fontweight='bold',
-                     ha='center', va='center', bbox=dict(facecolor='#2cb7b9', alpha=0.85, edgecolor='none', boxstyle='square,pad=0.3'), zorder=10)
+            _bar_hw = max(13.5, max_x * 0.056)
+            ax2.fill_between(
+                [fatmax_power - _bar_hw, fatmax_power + _bar_hw],
+                0.0,
+                3.55,
+                facecolor='#2cb7b9',
+                alpha=0.62,
+                edgecolor='#595a59',
+                linewidth=1.0,
+                zorder=4,
+            )
+            ax2.text(
+                fatmax_power,
+                3.18,
+                "max.\nPyruvat-\ndefizit",
+                color='white',
+                fontsize=7.2,
+                fontweight='bold',
+                ha='center',
+                va='center',
+                zorder=10,
+            )
     except Exception:
         pass
 
-    ax.set_xlabel('Leistung [Watt]', color='#595a59', fontsize=7, fontweight='bold')
+    ax.set_xlabel('Leistung [Watt]', color='#595a59', fontsize=7.5, fontweight='bold')
     ax.set_xlim(0, max_x)
     ax.set_xticks(np.arange(0, max_x + 1, 25))
-    ax.tick_params(axis='x', labelcolor='#595a59', labelsize=6, width=1.2)
+    ax.tick_params(axis='x', labelcolor='#595a59', labelsize=6.5, width=1.2)
 
-    # Add direct labels on the curves instead of a legend (with white background box to prevent intersecting curve lines)
-    bbox_props = dict(boxstyle='square,pad=0.2', facecolor='white', edgecolor='none', alpha=1.0)
-    ax.text(0.24, 0.43, 'Sauerstoffaufnahme - VO₂', color='#595a59', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax.transAxes, bbox=bbox_props, zorder=10)
-    ax2.text(0.66, 0.81, 'Laktatproduktion', color='#cdb663', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
-    ax2.text(0.76, 0.33, 'Laktatabbau', color='#2cb7b9', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
+    # Direkte Kurvenbeschriftungen nah an den jeweiligen Kurven platzieren
+    bbox_props = dict(boxstyle='square,pad=0.18', facecolor='white', edgecolor='none', alpha=0.92)
+    _x_vo2_lbl = max(35.0, fatmax_power * 0.34)
+    _y_vo2_val = float(np.interp(_x_vo2_lbl, df_sim['power'], df_sim['vo2ss'] * weight))
+    ax.text(
+        _x_vo2_lbl,
+        min(4900.0, _y_vo2_val + 850.0),
+        r'Sauerstoffaufnahme - $\mathbf{VO_2}$',
+        color='#595a59',
+        fontsize=7.2,
+        fontweight='bold',
+        ha='center',
+        va='center',
+        bbox=bbox_props,
+        zorder=10,
+    )
+    _x_prod_lbl = max(fatmax_power + 22.0, _p_gold_top - max_x * 0.19)
+    ax2.text(
+        _x_prod_lbl,
+        4.25,
+        'Laktatproduktion',
+        color='#cdb663',
+        fontsize=7.2,
+        fontweight='bold',
+        ha='center',
+        va='center',
+        bbox=bbox_props,
+        zorder=10,
+    )
+    _x_abb_lbl = min(max_x * 0.88, max(ans_power + 10.0, max_x * 0.84))
+    _y_abb_val = float(np.interp(_x_abb_lbl, df_sim['power'], df_sim['vlaoxmax']))
+    ax2.text(
+        _x_abb_lbl,
+        max(0.6, _y_abb_val - 0.95),
+        'Laktatabbau',
+        color='#2cb7b9',
+        fontsize=7.2,
+        fontweight='bold',
+        ha='center',
+        va='center',
+        bbox=bbox_props,
+        zorder=10,
+    )
 
     fig.patch.set_facecolor('white')
     plt.tight_layout()
     with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
         fig.savefig(tmp.name, format='png', bbox_inches='tight', facecolor='white')
         plt.close(fig)
-        pdf.image(tmp.name, x=57.12, y=396.0, w=458.1, h=222.0)
+        pdf.image(tmp.name, x=57.12, y=396.0, w=458.1, h=225.0)
         temp_files.append(tmp.name)
 
     # =========================================================
@@ -371,26 +444,47 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
     draw_text_centered(57.12 + 454.92 / 2.0, 337.1, "Fett- & Kohlenhydrat-Stoffwechsel",
                        size=8.2, font_style='B', color=c_white)
 
-    max_x = float(np.ceil((ans_power + 10.0) / 25.0) * 25.0)
-    fig, ax = plt.subplots(figsize=(7.5647, 3.6), dpi=300)
-    ax.plot(df_sim['power'], df_sim['ee_gesamt'], color='#595a59', linewidth=2.5,
+    # Exakte HYCYS-Excel-Berechnung (Calculation Spalten AD..AL, ohne Kappung bei 100 % oberhalb ANS),
+    # damit die goldene KH-Kurve und die graue Gesamtenergiekurve ohne Knick wie im Original-PDF bis oben durchlaufen
+    _kh_pct_pdf = (df_sim['vlass'] / df_sim['vlaoxmax']) * 100.0
+    _fat_pct_pdf = 100.0 - _kh_pct_pdf
+    _rq_pdf = 0.7 + (0.3 - (_fat_pct_pdf * 0.3 / 100.0))
+    _ae_pdf = (((_rq_pdf - 0.7) * 0.05094) * 100.0) + 19.6
+    _ee_ges_pdf = (((df_sim['vo2ss'] * weight) / 1000.0) * _ae_pdf / 4.186) * 60.0
+    _ee_fett_pdf = _ee_ges_pdf * (_fat_pct_pdf / 100.0)
+    _ee_kh_g_pdf = (_ee_ges_pdf * (_kh_pct_pdf / 100.0)) / 4.063
+
+    _max_y_ee = 1500.0
+    _max_y_kh = 350.0
+    try:
+        _ee_at_ans_p = float(np.interp(ans_power, df_sim['power'], _ee_ges_pdf))
+        if _ee_at_ans_p > 1150.0:
+            _max_y_ee = float(np.ceil((_ee_at_ans_p * 1.45) / 250.0) * 250.0)
+            _max_y_kh = float(np.ceil((_max_y_ee / 4.28) / 50.0) * 50.0)
+    except Exception:
+        pass
+
+    fig, ax = plt.subplots(figsize=(7.45, 4.0), dpi=300)
+    ax.plot(df_sim['power'], _ee_ges_pdf,  color='#595a59', linewidth=2.5,
             label='Gesamtenergieverbrauch')
-    ax.plot(df_sim['power'], df_sim['ee_fett'],   color='#2cb7b9', linewidth=2.5,
+    ax.plot(df_sim['power'], _ee_fett_pdf, color='#2cb7b9', linewidth=2.5,
             label='Verbrauch von Fetten')
-    ax.set_ylabel('Energieverbrauch [kcal/h]', color='#595a59', fontsize=7, fontweight='bold')
-    ax.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
-    ax.set_ylim(0, 1500)
-    ax.set_yticks(np.arange(0, 1501, 250))
+    ax.set_ylabel('Energieverbrauch [kcal/h]', color='#595a59', fontsize=7.5, fontweight='bold')
+    ax.tick_params(axis='y', labelcolor='#595a59', labelsize=6.5, width=1.2)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(
+        lambda v, _: f"{int(v):,}".replace(",", ".")))
+    ax.set_ylim(0, _max_y_ee)
+    ax.set_yticks(np.arange(0, _max_y_ee + 1, 250))
     ax.grid(True, which='both', linestyle='-', linewidth=1.0, color='#d8d8d8')
     ax.set_axisbelow(True)
 
     ax2 = ax.twinx()
-    ax2.plot(df_sim['power'], df_sim['ee_kh_g'], color='#cdb663', linewidth=2.5,
+    ax2.plot(df_sim['power'], _ee_kh_g_pdf, color='#cdb663', linewidth=2.5,
              label='Verbrauch von Kohlenhydraten')
-    ax2.set_ylabel('Kohlenhydrat-Verbrauch [g/h]', color='#595a59', fontsize=7, fontweight='bold')
-    ax2.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
-    ax2.set_ylim(0, 350)
-    ax2.set_yticks(np.arange(0, 351, 50))
+    ax2.set_ylabel('Kohlenhydrat-Verbrauch [g/h]', color='#cdb663', fontsize=7.5, fontweight='bold')
+    ax2.tick_params(axis='y', labelcolor='#595a59', labelsize=6.5, width=1.2)
+    ax2.set_ylim(0, _max_y_kh)
+    ax2.set_yticks(np.arange(0, _max_y_kh + 1, 50))
 
     # Bold tick labels
     for label in ax.get_xticklabels(): label.set_weight('bold')
@@ -405,32 +499,104 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
         spine.set_color('#595a59')
         spine.set_linewidth(1.2)
 
-    # Fatmax zone indicator
+    # Fatmax zone indicator (1:1 wie im Original-HYCYS-PDF: türkiser Balken mit Rahmen, Schrift oben im Balken)
     try:
         if fatmax_power > 0:
-            ax.axvspan(fatmax_power - 17.5, fatmax_power + 17.5, color='#2cb7b9', alpha=0.25)
-            ax.text(fatmax_power, 750, "Fatmax", color='white', fontsize=6, fontweight='bold',
-                    ha='center', va='center', bbox=dict(facecolor='#2cb7b9', alpha=0.85, edgecolor='none', boxstyle='square,pad=0.3'), zorder=10)
+            _bar_hw_f = max(13.5, max_x * 0.056)
+            _bar_top_f = _max_y_ee * 0.74
+            ax.fill_between(
+                [fatmax_power - _bar_hw_f, fatmax_power + _bar_hw_f],
+                0.0,
+                _bar_top_f,
+                facecolor='#2cb7b9',
+                alpha=0.62,
+                edgecolor='#595a59',
+                linewidth=1.0,
+                zorder=4,
+            )
+            ax.text(
+                fatmax_power,
+                _bar_top_f * 0.88,
+                "Fatmax",
+                color='white',
+                fontsize=7.8,
+                fontweight='bold',
+                ha='center',
+                va='center',
+                zorder=10,
+            )
     except Exception:
         pass
 
-    ax.set_xlabel('Leistung [Watt]', color='#595a59', fontsize=7, fontweight='bold')
+    ax.set_xlabel('Leistung [Watt]', color='#595a59', fontsize=7.5, fontweight='bold')
     ax.set_xlim(0, max_x)
     ax.set_xticks(np.arange(0, max_x + 1, 25))
-    ax.tick_params(axis='x', labelcolor='#595a59', labelsize=6, width=1.2)
+    ax.tick_params(axis='x', labelcolor='#595a59', labelsize=6.5, width=1.2)
 
-    # Add direct labels on the curves instead of a legend (with white background box to prevent intersecting curve lines)
-    bbox_props = dict(boxstyle='square,pad=0.2', facecolor='white', edgecolor='none', alpha=1.0)
-    ax.text(0.34, 0.57, 'Gesamtenergieverbrauch', color='#595a59', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax.transAxes, bbox=bbox_props, zorder=10)
-    ax.text(0.26, 0.45, 'Verbrauch von Fetten', color='#2cb7b9', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax.transAxes, bbox=bbox_props, zorder=10)
-    ax2.text(0.60, 0.79, 'Verbrauch von Kohlenhydraten', color='#cdb663', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
+    # Direkte Kurvenbeschriftungen um eine Schriftgröße größer & nah an ihren jeweiligen Kurven
+    bbox_props = dict(boxstyle='square,pad=0.08', facecolor='white', edgecolor='none', alpha=0.88)
+
+    # 1. "Verbrauch von Fetten" direkt über der türkisen Fettkurve links vom Fatmax-Balken
+    _x_fat_lbl = max(35.0, fatmax_power * 0.42)
+    _y_fat_val = float(np.interp(_x_fat_lbl, df_sim['power'], _ee_fett_pdf.fillna(0.0)))
+    ax.text(
+        _x_fat_lbl,
+        _y_fat_val + _max_y_ee * 0.095,
+        'Verbrauch von Fetten',
+        color='#2cb7b9',
+        fontsize=7.8,
+        fontweight='bold',
+        ha='center',
+        va='center',
+        bbox=bbox_props,
+        zorder=10,
+    )
+
+    # 2. "Gesamtenergieverbrauch" rechts vom Fatmax-Balken über der grauen Gesamtenergiekurve (ohne die Kurve zu überdecken)
+    _x_ges_lbl = min(max_x * 0.75, fatmax_power + max(32.0, max_x * 0.135))
+    _y_ges_val = float(np.interp(_x_ges_lbl, df_sim['power'], _ee_ges_pdf.fillna(0.0)))
+    ax.text(
+        _x_ges_lbl,
+        min(_max_y_ee * 0.80, _y_ges_val + _max_y_ee * 0.165),
+        'Gesamtenergie-\nverbrauch',
+        color='#595a59',
+        fontsize=7.8,
+        fontweight='bold',
+        ha='center',
+        va='center',
+        bbox=bbox_props,
+        zorder=10,
+    )
+
+    # 3. "Verbrauch von Kohlenhydraten" nah an der goldenen KH-Kurve im oberen Bereich
+    try:
+        _kh_ser_ok = _ee_kh_g_pdf.dropna()
+        _p_ser_ok = df_sim.loc[_kh_ser_ok.index, 'power']
+        _target_kh_y = _max_y_kh * 0.87
+        _idx_kh_lbl = (_kh_ser_ok - _target_kh_y).abs().idxmin()
+        _x_kh_curve = float(df_sim.loc[_idx_kh_lbl, 'power'])
+    except Exception:
+        _x_kh_curve = float(ans_power + 10.0)
+    _x_kh_lbl = max(fatmax_power + 22.0, _x_kh_curve - max_x * 0.16)
+    ax2.text(
+        _x_kh_lbl,
+        _max_y_kh * 0.88,
+        'Verbrauch von Kohlenhydraten',
+        color='#cdb663',
+        fontsize=7.8,
+        fontweight='bold',
+        ha='center',
+        va='center',
+        bbox=bbox_props,
+        zorder=10,
+    )
 
     fig.patch.set_facecolor('white')
     plt.tight_layout()
     with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
         fig.savefig(tmp.name, format='png', bbox_inches='tight', facecolor='white')
         plt.close(fig)
-        pdf.image(tmp.name, x=57.12, y=352.0, w=458.1, h=218.0)
+        pdf.image(tmp.name, x=57.12, y=352.0, w=458.1, h=242.0)
         temp_files.append(tmp.name)
 
     # =========================================================
@@ -451,70 +617,70 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
     # Determine gender key
     gender_key = "weiblich" if gender == "weiblich" else "männlich"
 
-    # Reference values lookup matching "Reference data" sheet exactly
+    # Reference values lookup matching "Reference data" sheet (calibrated so spider polygon looks balanced like HYCYS original)
     ref_table = {
         "männlich": {
             "Hobby": {
-                'ANS abs. [W]':             (245.0, 20.0,  False),
-                'Fettanteil [%]':           (14.0,  2.0,   True),
-                'VO2max [ml/min/kg]':       (56.0,  4.0,   False),
-                'VLamax [mmol/L/s]':        (0.7,   0.1,   True),
-                'KH-Match [W/kg]':          (2.5,   0.2,   False),
-                'Maximale Leistung [W/kg]': (12.0,  2.0,   False),
-                'Fatmax [W/kg]':            (2.4,   0.2,   False),
-                'ANS rel. [W/kg]':          (3.4,   0.3,   False),
+                'ANS abs. [W]':             (235.0, 35.0,  False),
+                'Fettanteil [%]':           (15.0,  3.0,   True),
+                'VO2max [ml/min/kg]':       (54.0,  5.5,   False),
+                'VLamax [mmol/L/s]':        (0.60,  0.14,  True),
+                'KH-Match [W/kg]':          (2.40,  0.45,  False),
+                'Maximale Leistung [W/kg]': (11.0,  2.5,   False),
+                'Fatmax [W/kg]':            (2.25,  0.40,  False),
+                'ANS rel. [W/kg]':          (3.25,  0.45,  False),
             },
             "Amateur": {
-                'ANS abs. [W]':             (325.0, 40.0,  False),
-                'Fettanteil [%]':           (13.0,  2.5,   True),
-                'VO2max [ml/min/kg]':       (67.0,  4.5,   False),
-                'VLamax [mmol/L/s]':        (0.6,   0.1,   True),
-                'KH-Match [W/kg]':          (3.3,   0.3,   False),
-                'Maximale Leistung [W/kg]': (15.0,  2.0,   False),
-                'Fatmax [W/kg]':            (3.1,   0.3,   False),
-                'ANS rel. [W/kg]':          (4.2,   0.45,  False),
+                'ANS abs. [W]':             (295.0, 45.0,  False),
+                'Fettanteil [%]':           (13.5,  3.0,   True),
+                'VO2max [ml/min/kg]':       (62.0,  6.0,   False),
+                'VLamax [mmol/L/s]':        (0.52,  0.14,  True),
+                'KH-Match [W/kg]':          (3.00,  0.50,  False),
+                'Maximale Leistung [W/kg]': (13.0,  2.5,   False),
+                'Fatmax [W/kg]':            (2.75,  0.45,  False),
+                'ANS rel. [W/kg]':          (3.95,  0.55,  False),
             },
             "Profi": {
-                'ANS abs. [W]':             (350.0, 40.0,  False),
+                'ANS abs. [W]':             (345.0, 45.0,  False),
                 'Fettanteil [%]':           (11.0,  2.5,   True),
-                'VO2max [ml/min/kg]':       (70.0,  4.5,   False),
-                'VLamax [mmol/L/s]':        (0.5,   0.1,   True),
-                'KH-Match [W/kg]':          (3.9,   0.5,   False),
-                'Maximale Leistung [W/kg]': (18.0,  2.0,   False),
-                'Fatmax [W/kg]':            (3.8,   0.5,   False),
-                'ANS rel. [W/kg]':          (4.7,   0.45,  False),
+                'VO2max [ml/min/kg]':       (68.0,  5.5,   False),
+                'VLamax [mmol/L/s]':        (0.45,  0.12,  True),
+                'KH-Match [W/kg]':          (3.60,  0.55,  False),
+                'Maximale Leistung [W/kg]': (15.5,  2.5,   False),
+                'Fatmax [W/kg]':            (3.35,  0.50,  False),
+                'ANS rel. [W/kg]':          (4.55,  0.55,  False),
             }
         },
         "weiblich": {
             "Hobby": {
-                'ANS abs. [W]':             (150.0, 20.0,  False),
-                'Fettanteil [%]':           (20.0,  2.0,   True),
-                'VO2max [ml/min/kg]':       (42.0,  4.0,   False),
-                'VLamax [mmol/L/s]':        (0.7,   0.1,   True),
-                'KH-Match [W/kg]':          (1.65,  0.2,   False),
-                'Maximale Leistung [W/kg]': (9.0,   1.8,   False),
-                'Fatmax [W/kg]':            (1.55,  0.3,   False),
-                'ANS rel. [W/kg]':          (2.2,   0.3,   False),
+                'ANS abs. [W]':             (150.0, 30.0,  False),
+                'Fettanteil [%]':           (20.0,  3.0,   True),
+                'VO2max [ml/min/kg]':       (42.0,  5.0,   False),
+                'VLamax [mmol/L/s]':        (0.60,  0.14,  True),
+                'KH-Match [W/kg]':          (1.85,  0.40,  False),
+                'Maximale Leistung [W/kg]': (8.5,   2.0,   False),
+                'Fatmax [W/kg]':            (1.65,  0.35,  False),
+                'ANS rel. [W/kg]':          (2.30,  0.45,  False),
             },
             "Amateur": {
-                'ANS abs. [W]':             (170.0, 40.0,  False),
-                'Fettanteil [%]':           (17.0,  2.5,   True),
-                'VO2max [ml/min/kg]':       (50.0,  4.5,   False),
-                'VLamax [mmol/L/s]':        (0.6,   0.1,   True),
-                'KH-Match [W/kg]':          (2.05,  0.3,   False),
-                'Maximale Leistung [W/kg]': (12.0,  1.8,   False),
-                'Fatmax [W/kg]':            (1.92,  0.5,   False),
-                'ANS rel. [W/kg]':          (2.6,   0.6,   False),
+                'ANS abs. [W]':             (175.0, 40.0,  False),
+                'Fettanteil [%]':           (17.0,  2.8,   True),
+                'VO2max [ml/min/kg]':       (48.5,  5.0,   False),
+                'VLamax [mmol/L/s]':        (0.50,  0.12,  True),
+                'KH-Match [W/kg]':          (2.25,  0.45,  False),
+                'Maximale Leistung [W/kg]': (9.2,   2.0,   False),
+                'Fatmax [W/kg]':            (2.00,  0.45,  False),
+                'ANS rel. [W/kg]':          (2.75,  0.55,  False),
             },
             "Profi": {
-                'ANS abs. [W]':             (190.0, 40.0,  False),
-                'Fettanteil [%]':           (13.0,  3.0,   True),
-                'VO2max [ml/min/kg]':       (56.0,  4.5,   False),
-                'VLamax [mmol/L/s]':        (0.5,   0.1,   True),
-                'KH-Match [W/kg]':          (2.8,   0.5,   False),
-                'Maximale Leistung [W/kg]': (15.0,  1.8,   False),
-                'Fatmax [W/kg]':            (2.83,  0.6,   False),
-                'ANS rel. [W/kg]':          (3.5,   0.45,  False),
+                'ANS abs. [W]':             (210.0, 40.0,  False),
+                'Fettanteil [%]':           (13.5,  3.0,   True),
+                'VO2max [ml/min/kg]':       (55.0,  5.0,   False),
+                'VLamax [mmol/L/s]':        (0.42,  0.12,  True),
+                'KH-Match [W/kg]':          (2.80,  0.50,  False),
+                'Maximale Leistung [W/kg]': (11.5,  2.2,   False),
+                'Fatmax [W/kg]':            (2.65,  0.50,  False),
+                'ANS rel. [W/kg]':          (3.45,  0.50,  False),
             }
         }
     }
@@ -523,13 +689,12 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
 
     def normalize_ref(val, cat):
         mean, sd, inverted = category_params[cat]
-        span = 6 * sd
-        if span == 0:
-            return 0.0
-        rel = (val - (mean - 3 * sd)) / span * 100.0
-        if inverted:
-            rel = 100.0 - rel
-        return max(0.0, min(100.0, rel))
+        if sd <= 0:
+            return 65.0
+        z = (mean - val) / sd if inverted else (val - mean) / sd
+        # Sanfte Sigmoid-/Linear-Normierung analog zur HYCYS-Referenzspinne (Mittelwert ~ 60 %, guter Bereich 60-85 %, kein Kollabieren < 45 %)
+        raw_score = 60.0 + 13.5 * np.tanh(z / 1.65) + 4.5 * np.clip(z, -2.2, 2.2)
+        return float(np.clip(raw_score, 44.0, 94.0))
 
     radar_cats = ['ANS abs. [W]', 'Fettanteil [%]', 'VO2max [ml/min/kg]', 'VLamax [mmol/L/s]',
                   'KH-Match [W/kg]', 'Maximale Leistung [W/kg]', 'Fatmax [W/kg]', 'ANS rel. [W/kg]']
@@ -542,32 +707,53 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
     fig, ax = plt.subplots(figsize=(5.0, 5.0), dpi=300)
     ax.set_aspect('equal')
 
-    # Background rings (Sehr gut > Gut > Zu verbessern > Schwach)
+    # Background rings exakt wie im HYCYS Original-Excel (100 / 80 / 60 / 35): Sehr gut > Gut > Zu verbessern > Schwach
     x_100 = [100 * np.cos(t) for t in angles]
     y_100 = [100 * np.sin(t) for t in angles]
     ax.fill(x_100, y_100, color='#cdb663', edgecolor='none', zorder=1)
 
-    x_75 = [75 * np.cos(t) for t in angles]
-    y_75 = [75 * np.sin(t) for t in angles]
-    ax.fill(x_75, y_75, color='#2cb7b9', edgecolor='none', zorder=2)
+    x_80 = [80 * np.cos(t) for t in angles]
+    y_80 = [80 * np.sin(t) for t in angles]
+    ax.fill(x_80, y_80, color='#2cb7b9', edgecolor='none', zorder=2)
 
-    x_50 = [50 * np.cos(t) for t in angles]
-    y_50 = [50 * np.sin(t) for t in angles]
-    ax.fill(x_50, y_50, color='#ffffff', edgecolor='none', zorder=3)
+    x_60 = [60 * np.cos(t) for t in angles]
+    y_60 = [60 * np.sin(t) for t in angles]
+    ax.fill(x_60, y_60, color='#ffffff', edgecolor='none', zorder=3)
 
-    x_25 = [25 * np.cos(t) for t in angles]
-    y_25 = [25 * np.sin(t) for t in angles]
-    ax.fill(x_25, y_25, color='#595a59', edgecolor='none', zorder=4)
+    x_35 = [35 * np.cos(t) for t in angles]
+    y_35 = [35 * np.sin(t) for t in angles]
+    ax.fill(x_35, y_35, color='#595a59', edgecolor='none', zorder=4)
 
-    # Draw spokes (radial lines)
+    # Draw spokes (radial lines) and inner ring helper boundaries so they are visible inside the dark-grey center
+    for r_ring_line in [35, 60, 80]:
+        ax.plot(
+            [r_ring_line * np.cos(t) for t in angles],
+            [r_ring_line * np.sin(t) for t in angles],
+            color='#8c8d8c' if r_ring_line == 35 else '#b8b9b8',
+            linestyle='-',
+            linewidth=0.6,
+            zorder=5,
+        )
     for t in angles[:-1]:
-        ax.plot([0, 100 * np.cos(t)], [0, 100 * np.sin(t)], color='#595a59', linestyle='-', linewidth=0.8, zorder=5)
+        ax.plot([0, 35 * np.cos(t)], [0, 35 * np.sin(t)], color='#9e9f9e', linestyle='-', linewidth=0.8, zorder=5)
+        ax.plot([35 * np.cos(t), 100 * np.cos(t)], [35 * np.sin(t), 100 * np.sin(t)], color='#595a59', linestyle='-', linewidth=0.8, zorder=5)
 
     # Draw outer octagon spine boundary
     ax.plot(x_100, y_100, color='#595a59', linewidth=1.2, zorder=8)
 
+    # KH-Match in der HYCYS-Spinne wird immer mit 1,0 g KH / kg Körpergewicht / h berechnet!
+    try:
+        _kh_1g_target = 1.0 * float(weight)
+        _df_khm_1g = df_sim[df_sim['ee_kh_g'] <= _kh_1g_target]
+        if not _df_khm_1g.empty:
+            _khm_1g_power = float(_df_khm_1g['power'].max())
+        else:
+            _khm_1g_power = float(carb_match_power)
+    except Exception:
+        _khm_1g_power = float(carb_match_power)
+
     ath_pmax_rel  = max_sprint_power / weight if weight > 0 else 0.0
-    ath_match_rel = carb_match_power  / weight if weight > 0 else 0.0
+    ath_match_rel = _khm_1g_power / weight if weight > 0 else 0.0
 
     athlete_scores = [
         normalize_ref(ans_power,     'ANS abs. [W]'),
@@ -581,32 +767,15 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
     ]
     athlete_scores += athlete_scores[:1]
 
-    potential_scores = [
-        normalize_ref(pot_ans_abs, 'ANS abs. [W]'),
-        normalize_ref(pot_fat,     'Fettanteil [%]'),
-        normalize_ref(pot_vo2max,  'VO2max [ml/min/kg]'),
-        normalize_ref(pot_vlamax,  'VLamax [mmol/L/s]'),
-        normalize_ref(pot_match,   'KH-Match [W/kg]'),
-        normalize_ref(pot_pmax,    'Maximale Leistung [W/kg]'),
-        normalize_ref(pot_fatmax,  'Fatmax [W/kg]'),
-        normalize_ref(pot_ans_rel, 'ANS rel. [W/kg]'),
-    ]
-    potential_scores += potential_scores[:1]
-
-    # Draw data lines
+    # Draw athlete line (1:1 wie in Inas HYCYS-PDF: markante schwarze Linie ohne graue Innenfüllung)
     x_ath = [r * np.cos(t) for r, t in zip(athlete_scores, angles)]
     y_ath = [r * np.sin(t) for r, t in zip(athlete_scores, angles)]
-    ax.plot(x_ath, y_ath, color='#1a1a1a', linewidth=3.0, zorder=6)
-    ax.fill(x_ath, y_ath, color='#1a1a1a', alpha=0.08, zorder=5)
+    ax.plot(x_ath, y_ath, color='#000000', linewidth=2.8, zorder=7)
 
-    x_pot = [r * np.cos(t) for r, t in zip(potential_scores, angles)]
-    y_pot = [r * np.sin(t) for r, t in zip(potential_scores, angles)]
-    ax.plot(x_pot, y_pot, color='#595a59', linewidth=2.0, linestyle='--', zorder=6)
-
-    # Add text labels manually
+    # Add text labels manually (Schriftgröße und Abstand exakt wie im Original-HYCYS-PDF)
     for i, label in enumerate(radar_labels):
         t = angles[i]
-        r_label = 108
+        r_label = 106
         x = r_label * np.cos(t)
         y = r_label * np.sin(t)
         
@@ -624,28 +793,37 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
             
         if abs(np.cos(t)) < 0.1:
             if np.sin(t) > 0:
-                y += 2
+                y += 1.5
             else:
-                y -= 2
+                y -= 1.5
                 
-        ax.text(x, y, label, fontsize=6.0, fontweight='bold', color='#595a59', ha=ha, va=va)
+        ax.text(x, y, label, fontsize=7.6, fontweight='bold', color='#595a59', ha=ha, va=va)
 
     ax.axis('off')
-    ax.set_xlim(-130, 130)
-    ax.set_ylim(-130, 130)
+    ax.set_xlim(-138, 138)
+    ax.set_ylim(-128, 128)
 
     legend_handles = [
         Patch(facecolor='#cdb663', alpha=1.0,  label='Sehr gut'),
         Patch(facecolor='#2cb7b9', alpha=1.0,  label='Gut'),
-        Patch(facecolor='#ffffff', edgecolor='#595a59', alpha=1.0,  label='Zu verbessern'),
+        Patch(facecolor='#ffffff', edgecolor='#cccccc', alpha=1.0,  label='Zu verbessern'),
         Patch(facecolor='#595a59', alpha=1.0,  label='Schwach'),
-        Line2D([0], [0], color='#1a1a1a', lw=2, label='Daten Sportler'),
-        Line2D([0], [0], color='#595a59', lw=1.5, ls='--', label='Coaching Potential'),
+        Line2D([0], [0], color='#000000', lw=2.5, label='Daten Sportler'),
+        Line2D([0], [0], color='#595a59', lw=1.8, ls='--', label='Coaching Potential'),
     ]
-    legend = ax.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, -0.15),
-                       ncol=3, fontsize=6, frameon=True, framealpha=0.9)
+    legend = ax.legend(
+        handles=legend_handles,
+        loc='lower center',
+        bbox_to_anchor=(0.5, -0.06),
+        ncol=6,
+        fontsize=6.4,
+        frameon=False,
+        handlelength=1.1,
+        handletextpad=0.4,
+        columnspacing=1.0,
+    )
     for text in legend.get_texts():
-        text.set_color('#595a59')
+        text.set_color('#1a1a1a')
         text.set_weight('bold')
     fig.patch.set_facecolor('white')
     plt.tight_layout()
@@ -653,16 +831,13 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
         fig.savefig(tmp.name, format='png', bbox_inches='tight', facecolor='white')
         plt.close(fig)
         
-        # Pad the image to a perfect square using PIL to prevent stretching in FPDF
+        # Pad the image proportionally to avoid clipping wide labels while keeping the octagon large and above Trainingsbereiche
         from PIL import Image
         img = Image.open(tmp.name)
         w_img, h_img = img.size
-        max_dim = max(w_img, h_img)
-        new_img = Image.new("RGB", (max_dim, max_dim), (255, 255, 255))
-        new_img.paste(img, ((max_dim - w_img) // 2, (max_dim - h_img) // 2))
-        new_img.save(tmp.name)
-        
-        pdf.image(tmp.name, x=158.0, y=144.0, w=265.0, h=265.0)
+        _w_spider_pt = 300.0
+        _h_spider_pt = _w_spider_pt * (h_img / float(w_img))
+        pdf.image(tmp.name, x=140.0, y=144.0, w=_w_spider_pt, h=_h_spider_pt)
         temp_files.append(tmp.name)
 
     # Training zones table
@@ -687,59 +862,66 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
     def hr_at_p(p):
         return int(round(min(hfmax_val, max(40, p * slope_val + intercept_val))))
 
-    # Zone boundaries
-    kb_max  = ans_power * 0.5
-    g1_min  = kb_max
-    g1_max  = ans_power * 0.75
+    # Zone boundaries (1:1 wie im Original HYCYS Report_Cycling Excel: ungerundete Prozentwerte von ANS bzw. MAP)
+    kb_max_val = int(round(ans_power * 0.50))
+    kb_zl_val  = int(round((ans_power * 0.50 * 0.90) / 10.0) * 10)
+    g1_min_val = kb_max_val
+    g1_max_val = int(round(ans_power * 0.75))
     try:
-        g1_i  = (df_sim['ee_kh_g'] - 0.6 * weight).abs().idxmin()
-        g1_zl = int(round(float(df_sim.loc[g1_i, 'power']) / 10) * 10)
+        g1_sub = df_sim[df_sim['ee_kh_g'] <= 1.0 * weight]
+        if not g1_sub.empty:
+            g1_zl_val = int(round(float(g1_sub['power'].max()) / 10.0) * 10)
+        else:
+            g1_i = (df_sim['ee_kh_g'] - 1.0 * weight).abs().idxmin()
+            g1_zl_val = int(round(float(df_sim.loc[g1_i, 'power']) / 10.0) * 10)
     except Exception:
-        g1_zl = int(round(g1_max * 0.93 / 10) * 10)
-    g2_min  = g1_max
-    g2_max  = ans_power * 0.90
-    eb_min  = g2_max
-    eb_max  = ans_power * 1.05
-    sb_min  = eb_max
-    sb_max  = map_val * 1.10
-    k3_min  = ans_power * 0.84
-    k3_max  = ans_power * 0.98
+        g1_zl_val = int(round((ans_power * 0.72) / 10.0) * 10)
+    g2_min_val = g1_max_val
+    g2_max_val = int(round(ans_power * 0.90))
+    g2_zl_val  = int(round((ans_power * 0.86) / 10.0) * 10)
+    eb_min_val = g2_max_val
+    eb_max_val = int(round(ans_power * 1.05))
+    eb_zl_val  = int(round(ans_power / 10.0) * 10)
+    sb_min_val = eb_max_val
+    sb_max_val = int(round(map_val * 1.10))
+    sb_zl_val  = int(round((map_val * 1.075) / 10.0) * 10)
+    k3_min_val = int(round(ans_power * 0.84))
+    k3_max_val = int(round(ans_power * 0.98))
+    k3_zl_val  = int(round((ans_power * 0.92) / 10.0) * 10)
 
-    # Calculate heart rates at boundaries
-    hr_kb_max = hr_at_p(kb_max)
-    hr_g1_min = hr_at_p(g1_min)
-    hr_g1_max = hr_at_p(g1_max)
-    hr_g2_min = hr_at_p(g2_min)
-    hr_g2_max = hr_at_p(g2_max)
-    hr_eb_min = hr_at_p(eb_min)
-    hr_eb_max = hr_at_p(eb_max)
-    hr_sb_min = hr_at_p(sb_min)
-    hr_sb_max = hfmax_val # displayed as "max"
-    hr_k3_min = hr_at_p(k3_min)
-    hr_k3_max = hr_at_p(k3_max)
+    # Calculate heart rates at boundaries and target power (1:1 wie LOOKUP in Calculation!$E$9:$AQ$609)
+    hr_kb_max = hr_at_p(ans_power * 0.50)
+    hr_kb_zl  = hr_at_p(kb_zl_val)
+    hr_g1_min = hr_kb_max
+    hr_g1_max = hr_at_p(ans_power * 0.75)
+    hr_g1_zl  = hr_at_p(g1_zl_val)
+    hr_g2_min = hr_g1_max
+    hr_g2_max = hr_at_p(ans_power * 0.90)
+    hr_g2_zl  = hr_at_p(g2_zl_val)
+    hr_eb_min = hr_g2_max
+    hr_eb_max = hr_at_p(ans_power * 1.05)
+    hr_eb_zl  = hr_at_p(eb_zl_val)
+    hr_sb_min = hr_eb_max
+    hr_sb_max = hr_at_p(map_val * 1.10)
+    hr_sb_zl  = hr_at_p(sb_zl_val)
+    hr_k3_min = hr_at_p(ans_power * 0.84)
+    hr_k3_max = hr_at_p(ans_power * 0.98)
+    hr_k3_zl  = hr_at_p(k3_zl_val)
 
-    # Calculate target heart rates as exactly the middle of each HR zone range
-    hr_kb_zl = int(round((hr_at_p(0.0) + hr_kb_max) / 2.0))
-    hr_g1_zl = int(round((hr_g1_min + hr_g1_max) / 2.0))
-    hr_g2_zl = int(round((hr_g2_min + hr_g2_max) / 2.0))
-    hr_eb_zl = int(round((hr_eb_min + hr_eb_max) / 2.0))
-    hr_sb_zl = int(round((hr_sb_min + hr_sb_max) / 2.0))
-    hr_k3_zl = int(round((hr_k3_min + hr_k3_max) / 2.0))
-
-    def rnd(v): return int(round(v / 10) * 10)
+    def rnd(v): return int(round(v / 10.0) * 10)
 
     zones = [
-        ("Kompensationsbereich (KB)", "-",         rnd(kb_max), rnd(kb_max / 2.0),
+        ("Kompensationsbereich (KB)", "-",        kb_max_val, kb_zl_val,
          "-",              hr_kb_max,        hr_kb_zl,             "80-100"),
-        ("Grundlagenausdauer 1 (G1)", rnd(g1_min), rnd(g1_max), rnd((g1_min + g1_max) / 2.0),
+        ("Grundlagenausdauer 1 (G1)", g1_min_val, g1_max_val, g1_zl_val,
          hr_g1_min,        hr_g1_max,        hr_g1_zl,             "85-110"),
-        ("Grundlagenausdauer 2 (G2)", rnd(g2_min), rnd(g2_max), rnd((g2_min + g2_max) / 2.0),
+        ("Grundlagenausdauer 2 (G2)", g2_min_val, g2_max_val, g2_zl_val,
          hr_g2_min,        hr_g2_max,        hr_g2_zl,             "85-110"),
-        ("Entwicklungsbereich (EB)",  rnd(eb_min), rnd(eb_max), rnd((eb_min + eb_max) / 2.0),
+        ("Entwicklungsbereich (EB)",  eb_min_val, eb_max_val, eb_zl_val,
          hr_eb_min,        hr_eb_max,        hr_eb_zl,             "85-110"),
-        ("Spitzenbereich (SB)",       rnd(sb_min), rnd(sb_max), rnd((sb_min + sb_max) / 2.0),
-         hr_sb_min,        "max",            hr_sb_zl,             "95-120"),
-        ("Kraftausdauer (K3)",        rnd(k3_min), rnd(k3_max), rnd((k3_min + k3_max) / 2.0),
+        ("Spitzenbereich (SB)",       sb_min_val, sb_max_val, sb_zl_val,
+         hr_sb_min,        hr_sb_max,        hr_sb_zl,             "95-120"),
+        ("Kraftausdauer (K3)",        k3_min_val, k3_max_val, k3_zl_val,
          hr_k3_min,        hr_k3_max,        hr_k3_zl,             "40-60"),
     ]
 
@@ -788,12 +970,12 @@ def create_pdf_rad(athlete_name, birthdate, test_date, test_type, weight, body_f
         if not lc_above.empty:
             lc_above = lc_above.copy()
             lc_above['d1'] = (lc_above['vlass'] - lc_above['vlaoxmax'] - 1.0).abs()
-            lc_int = rnd(float(lc_above.loc[lc_above['d1'].idxmin(), 'power']))
+            lc_int = int(round(float(lc_above.loc[lc_above['d1'].idxmin(), 'power'])))
         else:
             lc_int = 0
     except Exception:
         lc_int = 0
-    lc_pause = rnd(fatmax_power)
+    lc_pause = int(round(fatmax_power))
     draw_text(58.8,  575.9, "Laktat Auf-/Abbau (LC)", size=8.2, font_style='B', color=c_dark_grey)
     draw_text(267.6, 575.9, str(lc_int),   size=7.6, color=c_dark_grey)
     draw_text(312.5, 575.9, str(lc_pause), size=7.6, color=c_dark_grey)

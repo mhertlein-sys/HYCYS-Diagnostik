@@ -194,7 +194,7 @@ metadata_defaults = [
     ("body_fat_pct", 0.0), 
     ("last_uploaded_file", None),
     ("last_test_type", "HYCYS Standart (5min / +0,4m/s)"),
-    ("start_v", 2.8),
+    ("start_v", 2.5),
     ("v_increment", 0.4),
     ("anzahl", 5),
     ("vorlauf", 60),
@@ -1940,8 +1940,17 @@ def render_ans_coaching_diagrams(
             yr = [r_ring * np.sin(t) for t in angles_closed]
             ax_p.fill(xr, yr, color=col_ring, edgecolor="none", zorder=z_r)
 
+        for r_ring_line in [35, 60, 80]:
+            ax_p.plot(
+                [r_ring_line * np.cos(t) for t in angles_closed],
+                [r_ring_line * np.sin(t) for t in angles_closed],
+                color="#8c8d8c" if r_ring_line == 35 else "#b8b9b8",
+                linewidth=0.6,
+                zorder=5,
+            )
         for t in angles_rad:
-            ax_p.plot([0, 100 * np.cos(t)], [0, 100 * np.sin(t)], color="#595a59", linewidth=0.8, zorder=5)
+            ax_p.plot([0, 35 * np.cos(t)], [0, 35 * np.sin(t)], color="#9e9f9e", linewidth=0.8, zorder=5)
+            ax_p.plot([35 * np.cos(t), 100 * np.cos(t)], [35 * np.sin(t), 100 * np.sin(t)], color="#595a59", linewidth=0.8, zorder=5)
         ax_p.plot([100 * np.cos(t) for t in angles_closed], [100 * np.sin(t) for t in angles_closed],
                   color="#595a59", linewidth=1.2, zorder=8)
 
@@ -3947,11 +3956,54 @@ if separate_ramp:
 if "selected_threshold_model" not in st.session_state:
     st.session_state.selected_threshold_model = "OBLA 4.0 (ANS)"
 
+# Falls ein vorheriger Rerun (z. B. Datei-Upload) Widget-Werte vor der Instanziierung synchronisieren möchte:
+if "_pending_lauft_widget_sync" in st.session_state:
+    for _k_sync, _v_sync in st.session_state["_pending_lauft_widget_sync"].items():
+        st.session_state[_k_sync] = _v_sync
+    del st.session_state["_pending_lauft_widget_sync"]
+
 def _on_sidebar_thresh_change():
     st.session_state.selected_threshold_model = st.session_state.selected_threshold_model_widget
 
+def _on_test_type_change():
+    new_tt = st.session_state.get("test_type_lauft_widget", st.session_state.get("last_test_type"))
+    st.session_state.last_test_type = new_tt
+    if new_tt == "HYCYS Standart (5min / +0,4m/s)":
+        st.session_state.start_v = 2.5
+        st.session_state.v_increment = 0.400
+        st.session_state.anzahl = 5
+        st.session_state.stufendauer = 5.0
+    elif new_tt == "Neues Protokoll (3min / +1km/h bzw. 0,278m/s)":
+        st.session_state.start_v = 2.5
+        st.session_state.v_increment = 0.278
+        st.session_state.anzahl = 8
+        st.session_state.stufendauer = 3.0
+    st.session_state.vorlauf = 60
+    st.session_state.pausendauer = 30
+
+    # In on_change (vor Widget-Instanziierung) dürfen die Widget-Keys direkt gesetzt werden:
+    st.session_state.start_v_lauft_widget = st.session_state.start_v
+    st.session_state.anzahl_lauft_widget = st.session_state.anzahl
+    st.session_state.stufendauer_lauft_widget = st.session_state.stufendauer
+    st.session_state.vorlauf_lauft_widget = st.session_state.vorlauf
+    st.session_state.pausendauer_lauft_widget = st.session_state.pausendauer
+
+    if "df_lauftest_input" in st.session_state:
+        del st.session_state["df_lauftest_input"]
+    if "lauftest_lac_editor_key" in st.session_state:
+        del st.session_state["lauftest_lac_editor_key"]
+    st.session_state.lauf_auswertung_gestartet = False
+    for key in list(st.session_state.keys()):
+        if key.startswith("lauftest_end_t_") or key.startswith("lauftest_offset_"):
+            del st.session_state[key]
+
 with st.sidebar.expander("Testprotokoll", expanded=False):
-    test_type = st.selectbox("Testprotokoll", options=test_types, key="test_type_lauft_widget")
+    test_type = st.selectbox(
+        "Testprotokoll",
+        options=test_types,
+        key="test_type_lauft_widget",
+        on_change=_on_test_type_change,
+    )
 
     st.session_state.selected_threshold_model_widget = st.session_state.selected_threshold_model
     selected_model_name = st.selectbox(
@@ -3965,7 +4017,8 @@ with st.sidebar.expander("Testprotokoll", expanded=False):
     start_v = st.number_input("Startgeschwindigkeit (m/s)", value=float(st.session_state.start_v), step=0.1, key="start_v_lauft_widget")
     st.session_state.start_v = start_v
 
-    v_increment = st.number_input("Geschwindigkeitssteigerung (m/s)", value=float(st.session_state.v_increment), step=0.1, format="%.1f", key="v_increment_lauft_widget")
+    # Geschwindigkeitssteigerung fest über das gewählte Testprotokoll vorgegeben (nicht manuell auswählbar)
+    v_increment = 0.278 if test_type == "Neues Protokoll (3min / +1km/h bzw. 0,278m/s)" else 0.400
     st.session_state.v_increment = v_increment
 
     anzahl = st.number_input("Anzahl Stufen", value=int(st.session_state.anzahl), min_value=1, max_value=20, step=1, key="anzahl_lauft_widget")
@@ -3983,42 +4036,6 @@ with st.sidebar.expander("Testprotokoll", expanded=False):
         st.session_state.pausendauer = pausendauer
         
         ausbelastung = st.checkbox("Test bis zur Ausbelastung", value=True, key="ausbelastung_lauft_widget")
-
-if test_type != st.session_state.last_test_type:
-    st.session_state.last_test_type = test_type
-    if test_type == "HYCYS Standart (5min / +0,4m/s)":
-        st.session_state.start_v = 2.8
-        st.session_state.v_increment = 0.400
-        st.session_state.anzahl = 5
-        st.session_state.stufendauer = 5.0
-    elif test_type == "Neues Protokoll (3min / +1km/h bzw. 0,278m/s)":
-        st.session_state.start_v = 2.22
-        st.session_state.v_increment = 0.278
-        st.session_state.anzahl = 8
-        st.session_state.stufendauer = 3.0
-    # Ruhemessung and Pausendauer always 60s and 30s
-    st.session_state.vorlauf = 60
-    st.session_state.pausendauer = 30
-    
-    # Programmatically update the widgets' internal session state keys
-    st.session_state.start_v_lauft_widget = st.session_state.start_v
-    st.session_state.v_increment_lauft_widget = st.session_state.v_increment
-    st.session_state.anzahl_lauft_widget = st.session_state.anzahl
-    st.session_state.stufendauer_lauft_widget = st.session_state.stufendauer
-    st.session_state.vorlauf_lauft_widget = st.session_state.vorlauf
-    st.session_state.pausendauer_lauft_widget = st.session_state.pausendauer
-    
-    # Clear lactate table and editor states to force full rebuild
-    if "df_lauftest_input" in st.session_state:
-        del st.session_state["df_lauftest_input"]
-    if "lauftest_lac_editor_key" in st.session_state:
-        del st.session_state["lauftest_lac_editor_key"]
-    st.session_state.lauf_auswertung_gestartet = False
-    for key in list(st.session_state.keys()):
-        if key.startswith("lauftest_end_t_") or key.startswith("lauftest_offset_"):
-            del st.session_state[key]
-        
-    st.rerun()
 
 def detect_spiro_stage_ends(df_spiro, anzahl):
     n_rows = len(df_spiro)
@@ -4145,10 +4162,10 @@ if uploaded_file is not None and uploaded_file.name != st.session_state.last_upl
                     med_interval = float(np.median(np.diff(detected)))
                     if 280.0 <= med_interval <= 380.0:
                         st.session_state.stufendauer = 5.0
-                        st.session_state.stufendauer_lauft_widget = 5.0
+                        st.session_state["_pending_lauft_widget_sync"] = {"stufendauer_lauft_widget": 5.0}
                     elif 170.0 <= med_interval <= 250.0:
                         st.session_state.stufendauer = 3.0
-                        st.session_state.stufendauer_lauft_widget = 3.0
+                        st.session_state["_pending_lauft_widget_sync"] = {"stufendauer_lauft_widget": 3.0}
             else:
                 if "detected_stage_ends" in st.session_state:
                     del st.session_state.detected_stage_ends
@@ -4795,8 +4812,8 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
 
     if has_spiro:
         try:
-            glycogen_store = 250.0  # g
-            carb_intake_rate = 45.0  # g/h
+            glycogen_store = 500.0  # g (HYCYS Standard Eingabedaten!E16)
+            carb_intake_rate = 80.0  # g/h (HYCYS Standard Eingabedaten!E15)
             vo2_rest = 3.5 * weight
 
             # 1. Compute AC for each stage up to first stage above v_ans_val (for linear interpolation at ANS)
@@ -4888,31 +4905,34 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
                 carb_g_h_grid = ee_kh_kcal_h_grid / 4.063
 
                 fatmax_idx = max_clearance_idx
-                fatmax_total_energy = f"{ee_kcal_h_grid[fatmax_idx]:.1f}".replace('.', ',')
-                fatmax_fat_energy = f"{ee_fat_kcal_h_grid[fatmax_idx]:.1f}".replace('.', ',')
+                fatmax_total_energy = f"{int(round(ee_kcal_h_grid[fatmax_idx]))}"
+                fatmax_fat_energy = f"{int(round(ee_fat_kcal_h_grid[fatmax_idx]))}"
 
                 ans_speed_lookup = np.floor(v_ans * 100 + 1e-9) / 100.0
                 ans_idx = np.argmin(np.abs(v_grid - ans_speed_lookup))
-                ans_total_energy = f"{ee_kcal_h_grid[ans_idx]:.1f}".replace('.', ',')
-                ans_carb_consumption = f"{carb_g_h_grid[ans_idx]:.1f}".replace('.', ',')
+                ans_total_energy = f"{int(round(ee_kcal_h_grid[ans_idx]))}"
+                ans_carb_consumption = f"{int(round(carb_g_h_grid[ans_idx]))}"
 
                 def calc_marathon_speed_0():
                     for idx, v in enumerate(v_grid):
                         t_mara_min = 42195.0 / (v * 60.0)
-                        carb_req = ee_kh_kcal_h_grid[idx] / 60.0 * t_mara_min
-                        carb_avail = (carb_intake_rate / 60.0 * t_mara_min * 4.063) + (glycogen_store * 4.063)
-                        deficit = carb_req - carb_avail
+                        carb_req_g = carb_g_h_grid[idx] / 60.0 * t_mara_min
+                        carb_avail_g = (carb_intake_rate / 60.0 * t_mara_min) + glycogen_store
+                        deficit = carb_req_g - carb_avail_g
                         if deficit > 0:
-                            return v_grid[idx - 1]
-                    return v_grid[-1]
+                            return float(v_grid[max(0, idx - 1)] - 0.01)
+                    return float(v_grid[-1])
 
                 v_mara_0 = calc_marathon_speed_0()
-                v_mara_5 = v_mara_0 / 0.95
-                v_mara_10 = v_mara_0 / 0.90
-                v_mara_15 = v_mara_0 / 0.85
+                t_min_0 = 42195.0 / (v_mara_0 * 60.0)
+                t_min_5 = t_min_0 * 0.95
+                t_min_10 = t_min_0 * 0.90
+                t_min_15 = t_min_0 * 0.85
+                v_mara_5 = 42195.0 / (t_min_5 * 60.0)
+                v_mara_10 = 42195.0 / (t_min_10 * 60.0)
+                v_mara_15 = 42195.0 / (t_min_15 * 60.0)
 
-                for name, v_m in [("0%", v_mara_0), ("5%", v_mara_5), ("10%", v_mara_10), ("15%", v_mara_15)]:
-                    t_min = 42195.0 / (v_m * 60.0)
+                for pct_key, v_m, t_min in [(0, v_mara_0, t_min_0), (5, v_mara_5, t_min_5), (10, v_mara_10, t_min_10), (15, v_mara_15, t_min_15)]:
                     h = int(t_min // 60)
                     m = int(t_min % 60)
                     s = int(round((t_min * 60) % 60))
@@ -4922,21 +4942,17 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
                     if m == 60:
                         h += 1
                         m = 0
-                    
-                    pct_key = int(name.replace('%', ''))
                     marathon_paces[pct_key] = format_pace_helper(v_m)
-                    marathon_times[pct_key] = f"{h:02d}:{m:02d}:{s:02d}"
+                    marathon_times[pct_key] = f"{h:02d}:{m:02d}:{s:02d} h"
 
-                t_min_0 = 42195.0 / (v_mara_0 * 60.0)
-                for pct_key in [5, 10, 15]:
-                    t_min_p = 42195.0 / ((v_mara_0 / (1.0 - pct_key / 100.0)) * 60.0)
+                for pct_key, t_min_p in [(5, t_min_5), (10, t_min_10), (15, t_min_15)]:
                     delta_min = t_min_0 - t_min_p
                     dm = int(delta_min)
                     ds = int(round((delta_min - dm) * 60.0))
                     if ds == 60:
                         dm += 1
                         ds = 0
-                    marathon_deltas[pct_key] = f"-{dm:02d}:{ds:02d} min"
+                    marathon_deltas[pct_key] = f"- {dm:02d}:{ds:02d} min"
         except Exception as e:
             pass
 
@@ -5077,89 +5093,106 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_text_centered(57.6 + 458.1 / 2.0, 416.1, "Interaktion Laktatauf- & abbau", size=8.2, font_style='B', color=c_white)
     
     import math
-    fig, ax = plt.subplots(figsize=(6, 3.2), dpi=300)
-    v_start = float(speed[0]) if len(speed) > 0 else 2.6
-    v_end = float(speed[-1]) if len(speed) > 0 else 4.2
+    import matplotlib.ticker as ticker
+    fig, ax = plt.subplots(figsize=(6.0, 3.2), dpi=300)
+    stage_speeds_pdf = [float(v) for v in speed if pd.notna(v) and float(v) > 0]
+    if len(stage_speeds_pdf) >= 2:
+        _v_step_pdf = round(stage_speeds_pdf[-1] - stage_speeds_pdf[-2], 3)
+        if _v_step_pdf <= 0:
+            _v_step_pdf = 0.4
+        stage_speeds_pdf = stage_speeds_pdf + [round(stage_speeds_pdf[-1] + _v_step_pdf, 2)]
+    elif len(stage_speeds_pdf) == 1:
+        stage_speeds_pdf = stage_speeds_pdf + [round(stage_speeds_pdf[0] + 0.4, 2)]
+    v_start = float(stage_speeds_pdf[0]) if len(stage_speeds_pdf) > 0 else 2.5
+    v_end = float(stage_speeds_pdf[-1]) if len(stage_speeds_pdf) > 0 else 4.5
     v_plot_end = v_end
-    if v_grid is not None and 'delta_vo2_grid' in locals() and delta_vo2_grid is not None:
-        valid_lac_speeds = v_grid[(delta_vo2_grid > 0) & (v_grid >= v_start) & (v_grid <= v_end)]
-        if len(valid_lac_speeds) >= 2:
-            v_plot_end = float(valid_lac_speeds[-1])
     v_arr = np.linspace(v_start, v_plot_end, 100)
 
     ax2 = ax.twinx()
-    bbox_props = dict(boxstyle='square,pad=0.2', facecolor='white', edgecolor='none', alpha=0.9)
+    bbox_props = dict(boxstyle='square,pad=0.22', facecolor='white', edgecolor='none', alpha=0.92)
 
     if v_grid is not None and lac_clear_grid is not None and lac_prod_grid is not None and 'vo2_rel_demand_grid' in locals():
-        mask_lac = (v_grid >= v_start - 1e-6) & (v_grid <= v_plot_end + 1e-6) & (delta_vo2_grid > 0)
+        mask_lac = (v_grid >= v_start - 1e-6) & (v_grid <= v_plot_end + 1e-6)
         v_lac_plot = v_grid[mask_lac]
         vo2_abs_plot = vo2_rel_demand_grid[mask_lac] * weight
         lac_clear_plot = lac_clear_grid[mask_lac]
-        lac_prod_plot = lac_prod_grid[mask_lac]
+        lac_prod_raw = lac_prod_grid[mask_lac]
+        # Wo delta_vo2 <= 0 ist, Laktatproduktion auf > y2_max setzen, damit die goldene Kurve wie in Excel nach oben ausläuft
+        lac_prod_plot = np.where(delta_vo2_grid[mask_lac] > 0, lac_prod_raw, 15.0)
 
         ax.plot(v_lac_plot, vo2_abs_plot, color='#595a59', linewidth=2.5)
         ax2.plot(v_lac_plot, lac_clear_plot, color='#2cb7b9', linewidth=2.5)
         ax2.plot(v_lac_plot, lac_prod_plot, color='#cdb663', linewidth=2.5, linestyle='-')
 
         max_vo2_plot = float(np.max(vo2_abs_plot)) if len(vo2_abs_plot) > 0 else 4500.0
-        y1_lac_max = max(5500.0, math.ceil(max_vo2_plot * 1.25 / 500.0) * 500.0)
+        y1_lac_max = max(5500.0, math.ceil(max_vo2_plot * 1.20 / 500.0) * 500.0)
         ax.set_ylim(0, y1_lac_max)
+        ax.set_yticks(np.arange(0, y1_lac_max + 1, 500))
 
-        # HYCYS Excel Report Running skaliert die rechte Achse (Laktatkinetik) von 0 bis 5.0 mmol/L/min
-        ans_clear_val = float(np.interp(v_ans, v_lac_plot, lac_clear_plot)) if len(v_lac_plot) > 0 else 2.8
-        y2_lac_max = max(5.0, float(math.ceil(ans_clear_val * 1.75)))
+        # HYCYS Excel Report Running skaliert die rechte Achse (Laktatkinetik) von 0,0 bis 5,0 mmol/L/min (Schrittweite 0,5)
+        y2_lac_max = 5.0
         ax2.set_ylim(0, y2_lac_max)
+        ax2.set_yticks(np.arange(0.0, y2_lac_max + 0.01, 0.5))
 
         if len(v_lac_plot) >= 2:
-            x_span = v_lac_plot[-1] - v_lac_plot[0]
-            # 1. Label 'Sauerstoffaufnahme - VO2' bei ~28 % der X-Achse direkt über der grauen VO2-Kurve
-            v_lbl_vo2 = v_lac_plot[0] + 0.28 * x_span
-            y_lbl_vo2 = float(np.interp(v_lbl_vo2, v_lac_plot, vo2_abs_plot)) + 0.08 * y1_lac_max
-            ax.text(v_lbl_vo2, min(y_lbl_vo2, 0.92 * y1_lac_max), 'Sauerstoffaufnahme - VO2',
-                    color='#595a59', fontsize=6.5, fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
+            x_span = max(v_lac_plot[-1] - v_lac_plot[0], 1e-6)
+            # 1. Label 'Sauerstoffaufnahme - VO2' wie im Original-HYCYS-PDF links über der grauen VO2-Kurve
+            v_lbl_vo2 = v_lac_plot[0] + 0.25 * x_span
+            y_lbl_vo2 = float(np.interp(v_lbl_vo2, v_lac_plot, vo2_abs_plot)) + 0.12 * y1_lac_max
+            ax.text(v_lbl_vo2, min(y_lbl_vo2, 0.88 * y1_lac_max), 'Sauerstoffaufnahme - VO2',
+                    color='#595a59', fontsize=7.5, fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
 
-            # 2. Label 'Laktatabbau' bei ~45 % der X-Achse knapp über der türkisen Laktatabbau-Kurve
-            v_lbl_clr = v_lac_plot[0] + 0.45 * x_span
+            # 2. Label 'Laktatabbau' über der türkisen Laktatabbau-Kurve bei ~35 % der X-Achse
+            v_lbl_clr = v_lac_plot[0] + 0.35 * x_span
             y_clr_at_v = float(np.interp(v_lbl_clr, v_lac_plot, lac_clear_plot))
-            y_prd_at_v = float(np.interp(v_lbl_clr, v_lac_plot, lac_prod_plot))
-            offset_clr = 0.08 * y2_lac_max if y_clr_at_v >= y_prd_at_v else -0.08 * y2_lac_max
-            ax2.text(v_lbl_clr, max(0.08 * y2_lac_max, min(0.88 * y2_lac_max, y_clr_at_v + offset_clr)), 'Laktatabbau',
-                     color='#2cb7b9', fontsize=6.5, fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
+            ax2.text(v_lbl_clr, min(0.85 * y2_lac_max, y_clr_at_v + 0.11 * y2_lac_max), 'Laktatabbau',
+                     color='#2cb7b9', fontsize=7.5, fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
 
-            # 3. Label 'Laktatproduktion' im unteren/rechten Bereich an der goldenen Kurve ohne Überlappung
-            target_prod_y = 0.22 * y2_lac_max
-            idx_prd = int(np.argmin(np.abs(lac_prod_plot - target_prod_y)))
-            v_lbl_prd = float(v_lac_plot[idx_prd])
-            if abs(v_lbl_prd - v_lbl_clr) < 0.22 * x_span:
-                v_lbl_prd = v_lac_plot[0] + 0.72 * x_span
-            y_prd_val = float(np.interp(v_lbl_prd, v_lac_plot, lac_prod_plot))
-            y_lbl_prd = max(0.08 * y2_lac_max, min(0.88 * y2_lac_max, y_prd_val - 0.09 * y2_lac_max if y_prd_val > 0.20 * y2_lac_max else y_prd_val + 0.09 * y2_lac_max))
-            ax2.text(v_lbl_prd, y_lbl_prd, 'Laktatproduktion',
-                     color='#cdb663', fontsize=6.5, fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
+            # 3. Label 'Laktatproduktion' links vom steilen Ast der goldenen Kurve über der Kurve (wie im Original-HYCYS-PDF)
+            valid_prd_mask = lac_prod_plot <= y2_lac_max
+            if np.any(valid_prd_mask):
+                v_prd_sub = v_lac_plot[valid_prd_mask]
+                y_prd_sub = lac_prod_plot[valid_prd_mask]
+                idx_prd = int(np.argmin(np.abs(y_prd_sub - 1.50)))
+                v_lbl_prd = min(v_lac_plot[-1] - 0.14 * x_span, float(v_prd_sub[idx_prd]) + 0.08 * x_span)
+            else:
+                v_lbl_prd = v_lac_plot[0] + 0.70 * x_span
+            ax2.text(v_lbl_prd, 1.15, 'Laktatproduktion',
+                     color='#cdb663', fontsize=7.5, fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=10)
     else:
         if uploaded_file is not None and len(vo2_steady_abs) > 0:
             ax.plot(speed[:len(vo2_steady_abs)], vo2_steady_abs, color='#595a59', linewidth=2.5)
         ax.set_ylim(0, 5500)
+        ax.set_yticks(np.arange(0, 5501, 500))
         poly_coeffs = np.polyfit(speed, lactate, 3)
         poly_func = np.poly1d(poly_coeffs)
         ax2.plot(v_arr, poly_func(v_arr), color='#2cb7b9', linewidth=2.5)
         lac_prod = lactate[0] + (lactate[-1] - lactate[0]) * ((v_arr - v_start) / max(v_end - v_start, 1e-6)) ** 3.5
         ax2.plot(v_arr, lac_prod, color='#cdb663', linewidth=2.5, linestyle='-')
         ax2.set_ylim(0, 5.0)
-        ax.text(0.28, 0.62, 'Sauerstoffaufnahme - VO2', color='#595a59', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax.transAxes, bbox=bbox_props, zorder=10)
-        ax2.text(0.48, 0.45, 'Laktatabbau', color='#2cb7b9', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
-        ax2.text(0.72, 0.22, 'Laktatproduktion', color='#cdb663', fontsize=6.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
+        ax2.set_yticks(np.arange(0.0, 5.01, 0.5))
+        ax.text(0.26, 0.56, 'Sauerstoffaufnahme - VO2', color='#595a59', fontsize=7.5, fontweight='bold', ha='center', va='center', transform=ax.transAxes, bbox=bbox_props, zorder=10)
+        ax2.text(0.36, 0.40, 'Laktatabbau', color='#2cb7b9', fontsize=7.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
+        ax2.text(0.75, 0.29, 'Laktatproduktion', color='#cdb663', fontsize=7.5, fontweight='bold', ha='center', va='center', transform=ax2.transAxes, bbox=bbox_props, zorder=10)
 
-    ax.set_ylabel('VO2 [ml/min]', color='#595a59', fontsize=7, fontweight='bold')
+    ax.set_ylabel(r'$\mathbf{VO_2}$ [ml/min]', color='#595a59', fontsize=7, fontweight='bold')
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos: f"{int(round(x)):,}".replace(",", ".")))
     ax.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
-    ax.grid(True, which='both', linestyle='-', linewidth=1.0, color='#d8d8d8')
+    ax.grid(True, axis='y', linestyle='-', linewidth=0.8, color='#d8d8d8')
     ax.set_axisbelow(True)
 
-    ax2.set_ylabel('Laktatkinetik [mmol/L/min]', color='#595a59', fontsize=7, fontweight='bold')
-    ax2.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2)
+    ax2.set_ylabel('Laktatkinetik [mmol/L/min]', color='#2cb7b9', fontsize=7, fontweight='bold')
+    ax2.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos: f"{x:.1f}".replace(".", ",")))
+    ax2.tick_params(axis='y', labelcolor='#2cb7b9', labelsize=6, width=1.2, colors='#595a59')
+    for lbl_y2 in ax2.get_yticklabels():
+        lbl_y2.set_color('#2cb7b9')
     
     ax.set_xlabel('Geschwindigkeit [m/s]', color='#595a59', fontsize=7, fontweight='bold')
     ax.set_xlim(v_start, v_plot_end)
+    if len(stage_speeds_pdf) > 0:
+        ax.set_xticks(stage_speeds_pdf)
+        _all_1dec = all(abs(round(v, 1) - round(v, 2)) < 0.015 for v in stage_speeds_pdf)
+        ax.set_xticklabels([f"{v:.1f}".replace(".", ",") if _all_1dec else f"{v:.2f}".replace(".", ",") for v in stage_speeds_pdf])
     ax.tick_params(axis='x', labelcolor='#595a59', labelsize=6, width=1.2)
     
     for s in ax.spines.values():
@@ -5194,12 +5227,13 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_text_centered(57.6 + 103.5 / 2.0, 160.3, "Geschwindigkeit", size=8.2, font_style='B', color=c_white)
     draw_text_centered(57.6 + 103.5 + 103.5 / 2.0, 160.3, "Laufökonomie", size=8.2, font_style='B', color=c_white)
 
-    # Populate running economy values dynamically (HYCYS-Methodik in ml/kg/km, nur unterschwellige Stufen)
+    # Populate running economy values in original HYCYS PDF format (ml/min/kg*m/s, nur unterschwellige Stufen)
     speeds_s3 = []
     eco_vals_s3 = []
-    y_coords_s3_default = [173.2, 183.8, 197.1, 211.8, 225.1]
+    valid_lo_s3 = []
+    valid_speeds_s3 = []
+    y_coords_s3_default = [173.2, 185.8, 198.4, 211.0, 223.6]
     
-    # LO berechnen mit exakter HYCYS-Methodik und in ml/kg/km umrechnen (* 1000 / 60), überschwellige Stufen exkludieren
     n_pdf = len(speed)
     lo_pdf_list = calculate_laufokonomie_hycys_stages(
         speeds_arr   = list(speed[:n_pdf]),
@@ -5209,61 +5243,46 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
         v_thresh     = v_ans_val if v_ans_val > 0 else None,
     ) if len(vo2_steady_abs) > 0 else [None]*n_pdf
 
-    display_steps = n_pdf
-    passed_pdf_s3 = False
-    for i in range(display_steps):
-        v_ms  = speed[i]
-        if passed_pdf_s3:
-            continue
+    _s3_all_1dec = all(abs(round(float(v), 1) - round(float(v), 2)) < 0.015 for v in speed if pd.notna(v))
+    for i in range(n_pdf):
+        v_ms = float(speed[i])
         if v_ans_val > 0 and v_ms > v_ans_val + 1e-6:
-            passed_pdf_s3 = True
-        lo_v  = lo_pdf_list[i] if i < len(lo_pdf_list) else None
-        re_v  = (lo_v * 1000.0 / 60.0) if lo_v is not None else None
-
-        if re_v is not None:
-            eco_str = f"{re_v:.1f} ml/kg/km".replace('.', ',')
-            speeds_s3.append(f"{v_ms:.2f} m/s".replace('.', ','))
+            break
+        lo_v = lo_pdf_list[i] if i < len(lo_pdf_list) else None
+        v_fmt = f"{v_ms:.1f} m/s".replace('.', ',') if _s3_all_1dec else f"{v_ms:.2f} m/s".replace('.', ',')
+        if lo_v is not None:
+            eco_str = f"{lo_v:.1f} ml/min/kg*m/s".replace('.', ',')
+            speeds_s3.append(v_fmt)
             eco_vals_s3.append(eco_str)
+            valid_lo_s3.append(float(lo_v))
+            valid_speeds_s3.append(f"{v_ms:.1f}".replace('.', ',') if _s3_all_1dec else f"{v_ms:.2f}".replace('.', ','))
         elif len(vo2_steady_abs) == 0:
-            speeds_s3.append(f"{v_ms:.2f} m/s".replace('.', ','))
+            speeds_s3.append(v_fmt)
             eco_vals_s3.append("-")
         
     y_coords_s3 = y_coords_s3_default if len(speeds_s3) <= 5 else list(np.linspace(172.0, 226.5, len(speeds_s3)))
     font_s3 = 8.3 if len(speeds_s3) <= 5 else 7.2
     for i in range(len(speeds_s3)):
         y_coord = y_coords_s3[i]
-        draw_text_centered(57.6 + 103.5 / 2.0, y_coord, speeds_s3[i], size=font_s3, font_style='B', color=c_black)
-        draw_text_centered(57.6 + 103.5 + 103.5 / 2.0, y_coord, eco_vals_s3[i], size=font_s3, font_style='B', color=c_black)
+        draw_text_centered(57.6 + 103.5 / 2.0, y_coord, speeds_s3[i], size=font_s3, font_style='B', color=c_dark_grey)
+        draw_text_centered(57.6 + 103.5 + 103.5 / 2.0, y_coord, eco_vals_s3[i], size=font_s3, font_style='B', color=c_dark_grey)
 
-    # Chart 3a: Running Economy plot (HYCYS-Methodik in ml/kg/km, inkl. erster überschwelliger Stufe)
-    fig, ax = plt.subplots(figsize=(3, 1.8), dpi=300)
-    valid_re = []
-    valid_speeds_v = []
-    lo_chart_list = calculate_laufokonomie_hycys_stages(
-        speeds_arr   = list(speed),
-        vo2_abs_arr  = list(vo2_steady_abs) if len(vo2_steady_abs) == len(speed) else [0.0]*len(speed),
-        vco2_abs_arr = list(vco2_steady_abs) if len(vco2_steady_abs) == len(speed) else [0.0]*len(speed),
-        weight       = weight,
-        v_thresh     = v_ans_val if v_ans_val > 0 else None,
-    ) if len(vo2_steady_abs) > 0 else [None]*len(speed)
-    for i in range(len(speed)):
-        v_ms = speed[i]
-        lo_v = lo_chart_list[i] if i < len(lo_chart_list) else None
-        if lo_v is not None:
-            valid_re.append(lo_v * 1000.0 / 60.0)
-            valid_speeds_v.append(v_ms)
-            
-    if len(valid_re) > 0:
-        bar_w = (valid_speeds_v[-1] - valid_speeds_v[0]) / max(len(valid_speeds_v), 1) * 0.85
-        ax.bar(valid_speeds_v, valid_re, width=bar_w, color='#2cb7b9', zorder=3)
-        ax.set_ylim(min(valid_re)*0.9, max(valid_re)*1.1)
-        
-    ax.set_ylabel('RE [ml/kg/km]', color='#595a59', fontsize=6, fontweight='bold')
-    ax.set_xlabel('Geschwindigkeit [m/s]', color='#595a59', fontsize=6, fontweight='bold')
-    if len(speed) > 0:
-        ax.set_xlim(speed[0]*0.95, speed[-1]*1.05)
-    ax.tick_params(axis='both', labelsize=5, width=1.2)
-    ax.grid(True, axis='y', linestyle='-', linewidth=1.0, color='#d8d8d8')
+    # Chart 3a: Running Economy bar chart in original HYCYS PDF format (Y-axis: Laufökonomie 5..15)
+    fig, ax = plt.subplots(figsize=(3.2, 1.85), dpi=300)
+    if len(valid_lo_s3) > 0:
+        x_pos_s3 = np.arange(len(valid_lo_s3))
+        ax.bar(x_pos_s3, valid_lo_s3, width=0.68, color='#2cb7b9', zorder=3)
+        ax.set_xticks(x_pos_s3)
+        ax.set_xticklabels(valid_speeds_s3)
+        ax.set_xlim(-0.55, max(len(valid_lo_s3) - 0.45, 0.55))
+    ax.set_ylim(5, 15)
+    ax.set_yticks([5, 7, 9, 11, 13, 15])
+    ax.set_ylabel('Laufökonomie', color='#595a59', fontsize=6.5, fontweight='bold')
+    ax.set_xlabel('Geschwindigkeit [m/s]', color='#595a59', fontsize=6.5, fontweight='bold')
+    ax.tick_params(axis='both', labelcolor='#595a59', labelsize=5.5, width=1.2)
+    for label in ax.get_xticklabels(): label.set_weight('bold')
+    for label in ax.get_yticklabels(): label.set_weight('bold')
+    ax.grid(True, axis='y', linestyle='-', linewidth=0.8, color='#d8d8d8')
     ax.set_axisbelow(True)
     for s in ax.spines.values():
         s.set_color('#595a59')
@@ -5275,7 +5294,7 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
         pdf.image(tmp_eco_chart.name, x=266.8, y=156.2, w=257, h=135.6)
         temp_files.append(tmp_eco_chart.name)
 
-    # Marathon predictions table populating calculated values
+    # Marathon predictions table populating calculated values (0%, 5%, 10%, 15% wie im Original-HYCYS-PDF)
     draw_rect(57.6, 334.1, 414.0, 10.44, fill_color=c_teal)
     draw_text_centered(57.6 + 414.0 / 2.0, 335.2, "Einfluss Laufökonomie auf Marathon-Zeit", size=8.2, font_style='B', color=c_white)
 
@@ -5285,68 +5304,67 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_text_centered(316.35, 356.2, "Zielzeit", size=8.2, font_style='B', color=c_white)
     draw_text_centered(419.85, 356.2, "Delta zu 0%", size=8.2, font_style='B', color=c_white)
 
-    y_coords_s3_m = [386.0, 398.9, 412.3]
-    improves = ["0%", "5%", "10%"]
+    y_coords_s3_m = [373.0, 385.6, 398.2, 410.8]
+    improves = ["0%", "5%", "10%", "15%"]
     for imp, y_coord in zip(improves, y_coords_s3_m):
         pct_key = int(imp.replace('%', ''))
         pace_val = marathon_paces[pct_key]
         time_val = marathon_times[pct_key]
         delta_val = marathon_deltas[pct_key] if pct_key != 0 else "-"
         
-        draw_text_centered(109.35, y_coord, imp, size=9.0, font_style='B', color=c_dark_grey)
-        draw_text_centered(212.85, y_coord, pace_val, size=9.0, font_style='B', color=c_dark_grey)
-        draw_text_centered(316.35, y_coord, time_val, size=9.0, font_style='B', color=c_dark_grey)
+        draw_text_centered(109.35, y_coord, imp, size=8.3, font_style='B', color=c_dark_grey)
+        draw_text_centered(212.85, y_coord, pace_val, size=8.3, font_style='B', color=c_dark_grey)
+        draw_text_centered(316.35, y_coord, time_val, size=8.3, font_style='B', color=c_dark_grey)
         if pct_key != 0:
-            draw_text_centered(419.85, y_coord, delta_val, size=9.0, font_style='B', color=c_dark_grey)
+            draw_text_centered(419.85, y_coord, delta_val, size=8.3, font_style='B', color=c_dark_grey)
 
-    # Marathon prediction chart with line
-    fig, ax = plt.subplots(figsize=(5, 2.5), dpi=300)
+    # Marathon prediction horizontal bar chart (1..4 wie im Original-HYCYS-PDF)
+    fig, ax = plt.subplots(figsize=(5.2, 2.3), dpi=300)
     
     if has_spiro and fatmax_speed is not None:
-        y_vals = [0, 5, 10]
+        y_vals = [1, 2, 3, 4]
         t_0_h = 42195.0 / (v_mara_0 * 3600.0)
         t_5_h = 42195.0 / (v_mara_5 * 3600.0)
         t_10_h = 42195.0 / (v_mara_10 * 3600.0)
-        x_vals = [t_0_h, t_5_h, t_10_h]
+        t_15_h = 42195.0 / (v_mara_15 * 3600.0)
+        x_vals = [t_0_h, t_5_h, t_10_h, t_15_h]
         
-        x_min = min(x_vals) - 0.2
-        x_max = max(x_vals) + 0.1
+        step_10m = 10.0 / 60.0
+        x_min = math.floor((min(x_vals) - 0.15) / step_10m) * step_10m
+        if 2.0 <= min(x_vals) <= 3.15:
+            x_min = 2.0
+        x_max = math.ceil((max(x_vals) + 0.08) / step_10m) * step_10m
         
-        bar_height = 2.5
-        widths = [x - x_min for x in x_vals]
-        ax.barh(y_vals, widths, height=bar_height, left=x_min, color='#2cb7b9')
+        widths = [max(0.02, x - x_min) for x in x_vals]
+        ax.barh(y_vals, widths, height=0.66, left=x_min, color='#2cb7b9', zorder=3)
         
-        ax.set_ylim(-3, 13)
-        ax.set_yticks([0, 5, 10])
-        ax.set_yticklabels(['0%', '5%', '10%'])
+        ax.set_ylim(0.45, 4.55)
+        ax.set_yticks([1, 2, 3, 4])
+        ax.set_yticklabels(['1', '2', '3', '4'])
         
         ax.set_xlim(x_min, x_max)
+        x_ticks_mara = np.arange(x_min, x_max + 0.01, step_10m)
+        ax.set_xticks(x_ticks_mara)
         
-        import matplotlib.ticker as ticker
-        def format_hours(x, pos):
-            h = int(x)
-            m = int(round((x - h) * 60))
-            if m == 60:
-                h += 1
-                m = 0
+        def format_hours_hm(x, pos):
+            total_min = int(round(x * 60.0))
+            h = total_min // 60
+            m = total_min % 60
             return f"{h}:{m:02d}"
-        ax.xaxis.set_major_formatter(ticker.FuncFormatter(format_hours))
-        
-        for label in ax.get_xticklabels(): label.set_weight('bold'); label.set_size(5)
-        for label in ax.get_yticklabels(): label.set_weight('bold'); label.set_size(5)
+        ax.xaxis.set_major_formatter(ticker.FuncFormatter(format_hours_hm))
     else:
-        ax.set_xlim(2.0, 3.5)
-        ax.set_ylim(-3, 13)
-        ax.set_yticks([0, 5, 10])
-        ax.set_yticklabels(['0%', '5%', '10%'])
-        for label in ax.get_xticklabels(): label.set_weight('bold'); label.set_size(5)
-        for label in ax.get_yticklabels(): label.set_weight('bold'); label.set_size(5)
+        ax.set_xlim(2.0, 3.1667)
+        ax.set_ylim(0.4, 4.6)
+        ax.set_yticks([1, 2, 3, 4])
+        ax.set_yticklabels(['1', '2', '3', '4'])
 
-    ax.set_xlabel('Marathon-Zielzeit [h:mm]', color='#595a59', fontsize=6, fontweight='bold')
-    ax.set_ylabel('Verbesserung Laufökonomie [%]', color='#595a59', fontsize=6, fontweight='bold')
+    for label in ax.get_xticklabels(): label.set_weight('bold'); label.set_size(5.5)
+    for label in ax.get_yticklabels(): label.set_weight('bold'); label.set_size(5.5)
+    ax.set_xlabel('Marathon-Zielzeit [h:mm]', color='#595a59', fontsize=6.5, fontweight='bold')
+    ax.set_ylabel('Verbesserung Laufökonomie [%]', color='#595a59', fontsize=6.5, fontweight='bold')
     ax.tick_params(axis='both', labelcolor='#595a59', width=1.2)
     for s in ax.spines.values(): s.set_color('#595a59'); s.set_linewidth(1.2)
-    ax.grid(True, which='both', linestyle='-', linewidth=0.5, color='#d8d8d8')
+    ax.grid(True, axis='x', linestyle='-', linewidth=0.8, color='#d8d8d8')
     ax.set_axisbelow(True)
     plt.tight_layout()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_mara_chart:
@@ -5407,13 +5425,17 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
  
     ans_vo2_abs_str, ans_vo2_rel_str, ans_vo2_pct_str = "-", "-", "-"
     if uploaded_file is not None and v_ans_val > 0 and len(vo2_steady_values) > 0:
-        ans_vo2_rel = np.interp(v_ans_val, speed, vo2_steady_values)
+        if v_grid is not None and 'vo2_rel_demand_grid' in locals():
+            ans_v_lkp = np.floor(v_ans_val * 100.0 + 1e-9) / 100.0
+            ans_vo2_rel = float(vo2_rel_demand_grid[int(np.argmin(np.abs(v_grid - ans_v_lkp)))])
+        else:
+            ans_vo2_rel = float(np.interp(v_ans_val, speed, vo2_steady_values))
         ans_vo2_abs = ans_vo2_rel * weight
         ans_vo2_pct = (ans_vo2_rel / rel_vo2max * 100.0) if rel_vo2max > 0 else 0.0
         
-        ans_vo2_abs_str = f"{int(ans_vo2_abs):,}".replace(",", ".") + " ml/min"
+        ans_vo2_abs_str = f"{int(round(ans_vo2_abs)):,}".replace(",", ".") + " ml/min"
         ans_vo2_rel_str = f"{ans_vo2_rel:.1f} ml/min/kg".replace('.', ',')
-        ans_vo2_pct_str = f"{int(ans_vo2_pct)} %"
+        ans_vo2_pct_str = f"{int(round(ans_vo2_pct))} %"
  
     draw_text_centered(57.6 + 103.6 / 2.0, 246.14, ans_vo2_abs_str, size=8.3, font_style='B', color=c_dark_grey)
     draw_text_centered(212.8 + 103.6 / 2.0, 246.14, ans_vo2_rel_str, size=8.3, font_style='B', color=c_dark_grey)
@@ -5442,8 +5464,8 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_text_centered(57.6 + 207.0 / 2.0, 384.3, "Laufgeschwindigkeit", size=8.2, font_style='B', color=c_white)
  
     draw_rect(316.3, 383.1, 207.0, 10.44, fill_color=c_gold)
-    draw_text_centered(316.3 + 207.0 / 4.0, 384.3, "Energie", size=8.2, font_style='B', color=c_white)
-    draw_text_centered(316.3 + 3 * 207.0 / 4.0, 384.3, "Energie Fett", size=8.2, font_style='B', color=c_white)
+    draw_text_centered(316.3 + 207.0 / 4.0, 384.3, "Energieverbrauch", size=8.2, font_style='B', color=c_white)
+    draw_text_centered(316.3 + 3 * 207.0 / 4.0, 384.3, "Fettverbrauch", size=8.2, font_style='B', color=c_white)
  
     fatmax_speed_str = f"{fatmax_speed:.2f} m/s".replace('.', ',') if fatmax_speed is not None else "-"
     fatmax_total_energy_str = f"{fatmax_total_energy} kcal/h" if fatmax_total_energy != "-" else "-"
@@ -5454,27 +5476,27 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_text_centered(316.3 + 207.0 / 4.0, 394.34, fatmax_total_energy_str, size=8.3, font_style='B', color=c_dark_grey)
     draw_text_centered(316.3 + 3 * 207.0 / 4.0, 394.34, fatmax_fat_energy_str, size=8.3, font_style='B', color=c_dark_grey)
 
-    # Türkiser Balken für das zweite Diagramm: "Fett & Kohlenhydrat Stoffwechsel"
+    # Türkiser Balken für das zweite Diagramm: "Fett- & Kohlenhydrat-Stoffwechsel"
     draw_rect(57.6, 431.0, 465.7, 10.44, fill_color=c_teal)
-    draw_text_centered(57.6 + 465.7 / 2.0, 432.1, "Fett & Kohlenhydrat Stoffwechsel", size=8.2, font_style='B', color=c_white)
+    draw_text_centered(57.6 + 465.7 / 2.0, 432.1, "Fett- & Kohlenhydrat-Stoffwechsel", size=8.2, font_style='B', color=c_white)
 
-    # Energetik chart with dual-Y axis and plotted curves starting directly at the left edge
-    fig, ax = plt.subplots(figsize=(6, 3.2), dpi=300)
-    ax.set_xlabel('Geschwindigkeit [m/s]', color='#595a59', fontsize=6, fontweight='bold')
-    ax.set_ylabel('Energie [kcal/h]', color='#595a59', fontsize=6, fontweight='bold')
+    # Energetik chart matching original HYCYS PDF Page 4 1:1
+    fig, ax = plt.subplots(figsize=(6.0, 3.2), dpi=300)
+    ax.set_xlabel('Geschwindigkeit [m/s]', color='#595a59', fontsize=7, fontweight='bold')
+    ax.set_ylabel('Energie [kcal/h]', color='#595a59', fontsize=7, fontweight='bold')
     
-    v_start = float(speed[0]) if len(speed) > 0 else 2.6
-    v_end = float(speed[-1]) if len(speed) > 0 else 4.2
+    v_start = float(stage_speeds_pdf[0]) if len(stage_speeds_pdf) > 0 else 2.5
+    v_end = float(stage_speeds_pdf[-1]) if len(stage_speeds_pdf) > 0 else 4.5
     x_lo = v_start
     x_hi = v_end
-    if v_grid is not None and 'delta_vo2_grid' in locals() and delta_vo2_grid is not None:
-        valid_ener_speeds = v_grid[(delta_vo2_grid > 0) & (v_grid >= v_start) & (v_grid <= v_end)]
-        if len(valid_ener_speeds) >= 2:
-            x_hi = float(valid_ener_speeds[-1])
     ax.set_xlim(x_lo, x_hi)
+    if len(stage_speeds_pdf) > 0:
+        ax.set_xticks(stage_speeds_pdf)
+        _all_1dec_e = all(abs(round(v, 1) - round(v, 2)) < 0.015 for v in stage_speeds_pdf)
+        ax.set_xticklabels([f"{v:.1f}".replace(".", ",") if _all_1dec_e else f"{v:.2f}".replace(".", ",") for v in stage_speeds_pdf])
     
     ax2 = ax.twinx()
-    ax2.set_ylabel('Kohlenhydratverbrauch [g/h]', color='#595a59', fontsize=6, fontweight='bold')
+    ax2.set_ylabel('Kohlenhydratverbrauch [g/h]', color='#cdb663', fontsize=7, fontweight='bold')
     
     if has_spiro and fatmax_speed is not None:
         vis_mask = (v_grid >= x_lo - 1e-6) & (v_grid <= x_hi + 1e-6)
@@ -5483,93 +5505,113 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
         vis_fat = ee_fat_kcal_h_grid[vis_mask]
         vis_carb = carb_g_h_grid[vis_mask]
 
-        ax.plot(v_vis, vis_ee, color='#595a59', linewidth=2.5)
-        ax.plot(v_vis, vis_fat, color='#2cb7b9', linewidth=2.5)
-        ax2.plot(v_vis, vis_carb, color='#cdb663', linewidth=2.5, linestyle='-')
-        
-        if fatmax_speed > 0 and x_lo <= fatmax_speed <= x_hi:
-            ax.axvspan(max(x_lo, fatmax_speed - 0.1), min(x_hi, fatmax_speed + 0.1), color='#2cb7b9', alpha=0.25)
-        
-        # Compute Y-axis limits based on the VISIBLE speed range only
+        # Compute Y-axis limits matching original HYCYS Report Running Page 4 (0..1.500 kcal/h and 0..450 g/h)
         import math
-        y1_data_max = max(float(vis_ee.max()), float(vis_fat.max())) if len(vis_ee) > 0 else 1500.0
-        y2_data_max = float(vis_carb.max()) if len(vis_carb) > 0 else 350.0
-        
-        # Round up to nice tick values with ~12% headroom
-        y1_step = 100 if y1_data_max < 1500 else 200 if y1_data_max < 3000 else 500
-        y1_max = math.ceil(y1_data_max * 1.12 / y1_step) * y1_step
-        
-        y2_step = 50 if y2_data_max < 400 else 100 if y2_data_max < 800 else 200
-        y2_max = math.ceil(y2_data_max * 1.12 / y2_step) * y2_step
+        from matplotlib.patches import Rectangle
+        max_ee_vis = float(np.max(vis_ee)) if len(vis_ee) > 0 else 1350.0
+        y1_max = 1500.0 if max_ee_vis <= 1480.0 else math.ceil(max_ee_vis * 1.05 / 250.0) * 250.0
+        max_carb_vis = float(np.max(vis_carb)) if len(vis_carb) > 0 else 330.0
+        y2_max = 450.0 if max_carb_vis <= 430.0 else math.ceil(max_carb_vis * 1.08 / 50.0) * 50.0
         
         ax.set_ylim(0, y1_max)
-        ax2.set_ylim(0, y2_max)
-        
-        # --- Non-overlapping smart label positioning in normalized plot coordinates ---
-        bbox_props = dict(boxstyle='square,pad=0.2', facecolor='white', edgecolor='none', alpha=0.92)
-        placed_boxes = []  # list of (x_norm, y_norm, half_w, half_h)
+        ax.set_yticks(np.arange(0, y1_max + 1, 250))
+        ax2.set_ylim(0, min(y2_max, 420.0) if y2_max == 450.0 else y2_max)
+        ax2.set_yticks(np.arange(0, 401, 50) if y2_max == 450.0 else np.arange(0, y2_max + 1, 50))
+        if y2_max == 450.0:
+            ax2.set_ylim(0, 425.0)
+            y2_max = 425.0
 
-        def _resolve_non_overlapping_y(x_norm, y_norm_init, half_w=0.14, half_h=0.055):
-            # Try initial position first, then small vertical offsets to guarantee zero overlap
-            candidates = [y_norm_init]
-            for step in [0.07, -0.07, 0.13, -0.13, 0.19, -0.19, 0.25, -0.25]:
-                cand = y_norm_init + step
-                if 0.08 <= cand <= 0.92:
-                    candidates.append(cand)
-            best_y = max(0.08, min(0.92, y_norm_init))
-            for cand in candidates:
-                cand_clamped = max(0.08, min(0.92, cand))
-                collision = False
-                for (bx, by, bw, bh) in placed_boxes:
-                    if abs(x_norm - bx) < (half_w + bw) and abs(cand_clamped - by) < (half_h + bh):
-                        collision = True
-                        break
-                if not collision:
-                    best_y = cand_clamped
-                    break
-            placed_boxes.append((x_norm, best_y, half_w, half_h))
-            return best_y
-
-        # 1. Fatmax badge: near the bottom of the shaded Fatmax band
+        # Fatmax bar in background (height ~72% of y1_max, turquoise fill with grey outline and white bold "Fatmax" inside top)
         if fatmax_speed > 0 and x_lo <= fatmax_speed <= x_hi:
-            fm_x_norm = (fatmax_speed - x_lo) / max(x_hi - x_lo, 1e-6)
-            fm_y_norm = _resolve_non_overlapping_y(fm_x_norm, 0.14, half_w=0.07, half_h=0.05)
-            ax.text(fatmax_speed, fm_y_norm * y1_max,
-                    "Fatmax", color='white', fontsize=6, fontweight='bold', ha='center', va='center',
-                    bbox=dict(boxstyle='square,pad=0.2', facecolor='#2cb7b9', edgecolor='none'), zorder=12)
+            x_span_e = max(x_hi - x_lo, 1e-6)
+            bar_w_fm = 0.095 * x_span_e
+            bar_h_fm = 0.72 * y1_max
+            rect_fm = Rectangle(
+                (max(x_lo, fatmax_speed - bar_w_fm / 2.0), 0.0),
+                bar_w_fm,
+                bar_h_fm,
+                facecolor='#2cb7b9',
+                edgecolor='#595a59',
+                linewidth=1.1,
+                alpha=0.65,
+                zorder=2,
+            )
+            ax.add_patch(rect_fm)
+            ax.text(
+                fatmax_speed,
+                bar_h_fm - 0.045 * y1_max,
+                "Fatmax",
+                color='white',
+                fontsize=7.2,
+                fontweight='bold',
+                ha='center',
+                va='top',
+                zorder=5,
+            )
+
+        # Plot fat curve (left axis) and carbohydrate curve (right axis) matching original HYCYS PDF Page 4
+        ax.plot(v_vis, vis_fat, color='#2cb7b9', linewidth=2.5, zorder=4)
+        ax2.plot(v_vis, vis_carb, color='#cdb663', linewidth=2.5, linestyle='-', zorder=4)
         
-        # 2. Gesamtenergieverbrauch: at ~52% of x-range, above the grey curve
-        ges_x_frac = 0.52
-        ges_v = x_lo + (x_hi - x_lo) * ges_x_frac
-        ee_at_ges = float(np.interp(ges_v, v_vis, vis_ee))
-        ges_y_norm = _resolve_non_overlapping_y(ges_x_frac, (ee_at_ges / y1_max) + 0.08, half_w=0.16, half_h=0.055)
-        ax.text(ges_v, ges_y_norm * y1_max, 'Gesamtenergieverbrauch', color='#595a59', fontsize=6.5,
-                fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=11)
-        
-        # 3. Verbrauch von Fetten: at ~30% of x-range, below the teal curve (above Fatmax badge)
-        fat_x_frac = 0.30
-        fat_v = x_lo + (x_hi - x_lo) * fat_x_frac
-        fat_at_v = float(np.interp(fat_v, v_vis, vis_fat))
-        fat_y_norm = _resolve_non_overlapping_y(fat_x_frac, max(0.24, (fat_at_v / y1_max) - 0.08), half_w=0.14, half_h=0.055)
-        ax.text(fat_v, fat_y_norm * y1_max, 'Verbrauch von Fetten', color='#2cb7b9', fontsize=6.5,
-                fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=11)
-        
-        # 4. Kohlenhydratverbrauch: at ~74% of x-range, below the gold curve (on ax2 scale)
-        carb_x_frac = 0.74
-        carb_v = x_lo + (x_hi - x_lo) * carb_x_frac
-        carb_at_v = float(np.interp(carb_v, v_vis, vis_carb))
-        carb_y_norm = _resolve_non_overlapping_y(carb_x_frac, (carb_at_v / y2_max) - 0.09, half_w=0.15, half_h=0.055)
-        ax2.text(carb_v, carb_y_norm * y2_max, 'Kohlenhydratverbrauch', color='#cdb663', fontsize=6.5,
-                 fontweight='bold', ha='center', va='center', bbox=bbox_props, zorder=11)
+        bbox_props_e = dict(boxstyle='square,pad=0.22', facecolor='white', edgecolor='none', alpha=0.92)
+        x_span_e = max(x_hi - x_lo, 1e-6)
+
+        # 1. 'Verbrauch von Fetten' Rechts vom Fatmax-Balken direkt über der türkisen Fettkurve (wie im Original-PDF)
+        if fatmax_speed > 0 and x_lo <= fatmax_speed <= x_hi:
+            fat_lbl_v = min(x_hi - 0.18 * x_span_e, fatmax_speed + 0.175 * x_span_e)
+        else:
+            fat_lbl_v = x_lo + 0.45 * x_span_e
+        fat_at_lbl = float(np.interp(fat_lbl_v, v_vis, vis_fat))
+        fat_lbl_y = min(0.85 * y1_max, fat_at_lbl + 0.115 * y1_max)
+        ax.text(
+            fat_lbl_v,
+            fat_lbl_y,
+            'Verbrauch von Fetten',
+            color='#2cb7b9',
+            fontsize=7.5,
+            fontweight='bold',
+            ha='center',
+            va='center',
+            bbox=bbox_props_e,
+            zorder=10,
+        )
+
+        # 2. 'Verbrauch von\nKohlenhydraten' über dem oberen Ast der goldenen Kohlenhydratkurve (wie im Original-PDF)
+        carb_lbl_v = x_lo + 0.71 * x_span_e
+        carb_at_lbl = float(np.interp(carb_lbl_v, v_vis, vis_carb))
+        carb_lbl_y = min(0.91 * y2_max, max(0.55 * y2_max, carb_at_lbl + 0.11 * y2_max))
+        ax2.text(
+            carb_lbl_v,
+            carb_lbl_y,
+            'Verbrauch von\nKohlenhydraten',
+            color='#cdb663',
+            fontsize=7.5,
+            fontweight='bold',
+            ha='center',
+            va='center',
+            bbox=bbox_props_e,
+            zorder=10,
+        )
     else:
         ax.set_ylim(0, 1500)
-        ax2.set_ylim(0, 400)
+        ax.set_yticks(np.arange(0, 1501, 250))
+        ax2.set_ylim(0, 425)
+        ax2.set_yticks(np.arange(0, 401, 50))
         
-    ax.tick_params(axis='both', labelcolor='#595a59', labelsize=5, width=1.2)
-    ax2.tick_params(axis='both', labelcolor='#595a59', labelsize=5, width=1.2)
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos: f"{int(round(x)):,}".replace(",", ".")))
+    ax.tick_params(axis='both', labelcolor='#595a59', labelsize=6, width=1.2)
+    ax2.set_ylabel('Kohlenhydratverbrauch [g/h]', color='#595a59', fontsize=7, fontweight='bold')
+    ax2.tick_params(axis='y', labelcolor='#595a59', labelsize=6, width=1.2, colors='#595a59')
+    for lbl_y2_e in ax2.get_yticklabels():
+        lbl_y2_e.set_color('#595a59')
+        lbl_y2_e.set_weight('bold')
+    for lbl_x_e in ax.get_xticklabels():
+        lbl_x_e.set_weight('bold')
+    for lbl_y_e in ax.get_yticklabels():
+        lbl_y_e.set_weight('bold')
     for s in ax.spines.values(): s.set_color('#595a59'); s.set_linewidth(1.2)
     for s in ax2.spines.values(): s.set_color('#595a59'); s.set_linewidth(1.2)
-    ax.grid(True, which='both', linestyle='-', linewidth=0.5, color='#d8d8d8')
+    ax.grid(True, axis='y', linestyle='-', linewidth=0.8, color='#d8d8d8')
     ax.set_axisbelow(True)
     plt.tight_layout()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_ener_chart:
@@ -5587,25 +5629,26 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_rect(57.6, 133.9, 155.3, 10.44, fill_color=c_teal)
     draw_text_centered(57.6 + 155.3 / 2.0, 135.0, "Referenzdaten", size=8.2, font_style='B', color=c_white)
 
-    # Cartesian Radar chart for Reference data
+    # Cartesian Radar chart for Reference data matching original HYCYS PDF Page 5 1:1
     fig, ax = plt.subplots(figsize=(5.0, 5.0), dpi=300)
     ax.set_aspect('equal')
     
     radar_cats = ['VO2max', 'Fettanteil', 'Laufökonomie', 'ANS', 'Fatmax', 'KH-Match', 'VLamax']
     radar_labels = [
-        'VO2max\n[ml/min/kg]',
-        'Fettanteil\n[%]',
-        'Laufökonomie\n[ml/kg/km]',
-        'ANS\n[m/s]',
-        'Fatmax\n[m/s]',
-        'KH-Match\n[m/s]',
-        'VLamax\n[mmol/l/s]'
+        'VO2max [ml/min/kg]',
+        'Fettanteil [%]',
+        'Laufökonomie [ml/min/kg*m/s]',
+        'ANS [m/s]',
+        'Fatmax [m/s]',
+        'KH-Match [m/s]',
+        'VLamax [mmol/l/s]'
     ]
     N = len(radar_cats)
-    angles = [n / float(N) * 2 * np.pi for n in range(N)]
+    # Excel Radar Chart: Kategorie 0 (VO2max) startet oben bei 90° und läuft im Uhrzeigersinn!
+    angles = [np.pi / 2.0 - n / float(N) * 2.0 * np.pi for n in range(N)]
     angles += angles[:1]
     
-    # Background rings (Sehr gut > Gut > Zu verbessern > Schwach)
+    # Background rings (Sehr gut > Gut > Zu verbessern > Schwach: 100 / 80 / 60 / 35)
     x_100 = [100 * np.cos(t) for t in angles]
     y_100 = [100 * np.sin(t) for t in angles]
     ax.fill(x_100, y_100, color='#cdb663', edgecolor='none', zorder=1, label='Sehr gut')
@@ -5622,139 +5665,130 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     y_35 = [35 * np.sin(t) for t in angles]
     ax.fill(x_35, y_35, color='#595a59', edgecolor='none', zorder=4, label='Schwach')
     
-    # Normalize running reference values
+    # Normalize running reference values smoothly matching HYCYS Reference data
     def normalize_ref_running(val, cat):
         ref_params = {
-            'VO2max':       (60.0,  5.0,   False),
-            'Fettanteil':   (13.0,  2.5,   True),
-            'Laufökonomie': (210.0, 15.0,  True),
-            'ANS':          (3.5,   0.4,   False),
-            'Fatmax':       (2.7,   0.3,   False),
-            'KH-Match':     (3.0,   0.3,   False),
-            'VLamax':       (0.6,   0.1,   True),
+            'VO2max':       (52.0,  5.0,   False),
+            'Fettanteil':   (14.0,  2.5,   True),
+            'Laufökonomie': (10.5,  1.2,   True),
+            'ANS':          (3.6,   0.35,  False),
+            'Fatmax':       (2.8,   0.35,  False),
+            'KH-Match':     (2.6,   0.35,  False),
+            'VLamax':       (0.58,  0.10,  True),
         }
         if cat not in ref_params:
-            return 50.0
+            return 65.0
         mean, sd, inverted = ref_params[cat]
-        span = 6 * sd
-        if span == 0:
-            return 0.0
-        rel = (val - (mean - 3 * sd)) / span * 100.0
-        if inverted:
-            rel = 100.0 - rel
-        return max(0.0, min(100.0, rel))
+        if sd <= 0:
+            return 65.0
+        z = (mean - val) / sd if inverted else (val - mean) / sd
+        raw_score = 62.0 + 13.5 * np.tanh(z / 1.65) + 4.5 * np.clip(z, -2.2, 2.2)
+        return float(np.clip(raw_score, 44.0, 94.0))
 
-    import streamlit as st
-    pot_vo2max = float(st.session_state.get("pot_vo2max", 72.0))
-    pot_fat = float(st.session_state.get("pot_fat", 10.5))
-    pot_ans_rel = float(st.session_state.get("pot_ans_rel", 4.8))
-    pot_fatmax = float(st.session_state.get("pot_fatmax", 3.4))
-    pot_match = float(st.session_state.get("pot_match", 3.6))
-    pot_vlamax = float(st.session_state.get("pot_vlamax", 0.45))
-
-    re_val = 210.0
-    if len(valid_re) > 0:
-        re_val = np.mean(valid_re)
-
+    lo_mean_pdf = float(np.mean(valid_lo_s3)) if len(valid_lo_s3) > 0 else 10.5
     v_fatmax = fatmax_speed if (fatmax_speed is not None and fatmax_speed > 0) else (v_ans * 0.78)
-    kh_target_pdf = float(st.session_state.get("kh_match_g_h_lauf", 90.0))
-    v_kh_match = float(st.session_state.get("v_kh_match_lauf", v_ans * 0.85))
+    # In HYCYS Reference data für Laufen wird KH-Match standardmäßig mit 0,6 g/kg KG/h (bzw. eingestelltem Slider) berechnet
+    kh_target_pdf = 0.6 * float(weight)
+    v_kh_match = v_ans * 0.78
     if has_spiro and v_grid is not None and 'carb_g_h_grid' in locals():
         try:
-            v_kh_match = float(v_grid[np.argmin(np.abs(carb_g_h_grid - kh_target_pdf))])
+            sub_m_khm = (delta_vo2_grid > 0)
+            if np.any(sub_m_khm):
+                v_sub_k = v_grid[sub_m_khm]
+                c_sub_k = carb_g_h_grid[sub_m_khm]
+                le_k = c_sub_k <= kh_target_pdf
+                if np.any(le_k):
+                    v_kh_match = float(v_sub_k[int(np.where(le_k)[0][-1])])
+                else:
+                    v_kh_match = float(v_sub_k[int(np.argmin(np.abs(c_sub_k - kh_target_pdf)))])
         except Exception:
             pass
 
     athlete_scores = [
-        normalize_ref_running(rel_vo2max,    'VO2max'),
-        normalize_ref_running(body_fat_pct,  'Fettanteil'),
-        normalize_ref_running(re_val,        'Laufökonomie'),
-        normalize_ref_running(v_ans,         'ANS'),
-        normalize_ref_running(v_fatmax,      'Fatmax'),
-        normalize_ref_running(v_kh_match,    'KH-Match'),
-        normalize_ref_running(vla_val,       'VLamax'),
+        normalize_ref_running(rel_vo2max,   'VO2max'),
+        normalize_ref_running(body_fat_pct, 'Fettanteil'),
+        normalize_ref_running(lo_mean_pdf,  'Laufökonomie'),
+        normalize_ref_running(v_ans,        'ANS'),
+        normalize_ref_running(v_fatmax,     'Fatmax'),
+        normalize_ref_running(v_kh_match,   'KH-Match'),
+        normalize_ref_running(vla_val,      'VLamax'),
     ]
     athlete_scores += athlete_scores[:1]
 
-    pot_v_ans = pot_ans_rel if pot_ans_rel < 10 else v_ans * 1.15
-    pot_v_fatmax = pot_fatmax if pot_fatmax < 10 else v_fatmax * 1.15
-    pot_v_match = pot_match if pot_match < 10 else v_kh_match * 1.15
-
-    re_pot_pct_pdf = float(st.session_state.get("lauf_re_pot_slider", -5))
-    pot_re_val = re_val * (1.0 + re_pot_pct_pdf / 100.0)
-
-    potential_scores = [
-        normalize_ref_running(pot_vo2max,  'VO2max'),
-        normalize_ref_running(pot_fat,     'Fettanteil'),
-        normalize_ref_running(pot_re_val,  'Laufökonomie'),
-        normalize_ref_running(pot_v_ans,   'ANS'),
-        normalize_ref_running(pot_v_fatmax, 'Fatmax'),
-        normalize_ref_running(pot_v_match, 'KH-Match'),
-        normalize_ref_running(pot_vlamax,  'VLamax'),
-    ]
-    potential_scores += potential_scores[:1]
-
-    # Draw spokes (radial lines)
+    # Draw inner ring helper boundaries and radial spokes so helper lines extend visibly into the dark-grey center
+    for r_ring_line in [35, 60, 80]:
+        ax.plot(
+            [r_ring_line * np.cos(t) for t in angles],
+            [r_ring_line * np.sin(t) for t in angles],
+            color='#8c8d8c' if r_ring_line == 35 else '#b8b9b8',
+            linestyle='-',
+            linewidth=0.6,
+            zorder=5,
+        )
     for t in angles[:-1]:
-        ax.plot([0, 100 * np.cos(t)], [0, 100 * np.sin(t)], color='#595a59', linestyle='-', linewidth=0.8, zorder=5)
+        ax.plot([0, 35 * np.cos(t)], [0, 35 * np.sin(t)], color='#9e9f9e', linestyle='-', linewidth=0.8, zorder=5)
+        ax.plot([35 * np.cos(t), 100 * np.cos(t)], [35 * np.sin(t), 100 * np.sin(t)], color='#595a59', linestyle='-', linewidth=0.8, zorder=5)
 
     # Draw outer heptagon spine boundary
     ax.plot(x_100, y_100, color='#595a59', linewidth=1.2, zorder=8)
 
-    # Draw data lines
+    # Draw athlete line (markante schwarze Linie wie im Original-HYCYS-PDF)
     x_ath = [r * np.cos(t) for r, t in zip(athlete_scores, angles)]
     y_ath = [r * np.sin(t) for r, t in zip(athlete_scores, angles)]
-    ax.plot(x_ath, y_ath, color='#1a1a1a', linewidth=3.0, zorder=6)
-    ax.fill(x_ath, y_ath, color='#1a1a1a', alpha=0.08, zorder=5)
-
-    x_pot = [r * np.cos(t) for r, t in zip(potential_scores, angles)]
-    y_pot = [r * np.sin(t) for r, t in zip(potential_scores, angles)]
-    ax.plot(x_pot, y_pot, color='#595a59', linewidth=2.0, linestyle='--', zorder=6)
+    ax.plot(x_ath, y_ath, color='#000000', linewidth=2.8, zorder=7)
 
     # Add text labels manually
     for i, label in enumerate(radar_labels):
         t = angles[i]
-        r_label = 112
+        r_label = 107
         x = r_label * np.cos(t)
         y = r_label * np.sin(t)
         
         ha = 'center'
-        if np.cos(t) > 0.1:
+        if np.cos(t) > 0.15:
             ha = 'left'
-        elif np.cos(t) < -0.1:
+        elif np.cos(t) < -0.15:
             ha = 'right'
             
         va = 'center'
-        if np.sin(t) > 0.1:
+        if np.sin(t) > 0.25:
             va = 'bottom'
-        elif np.sin(t) < -0.1:
+        elif np.sin(t) < -0.25:
             va = 'top'
             
-        if abs(np.cos(t)) < 0.1:
+        if abs(np.cos(t)) < 0.15:
             if np.sin(t) > 0:
-                y += 2
+                y += 1.5
             else:
-                y -= 2
+                y -= 1.5
                 
-        ax.text(x, y, label, fontsize=5.0, fontweight='bold', color='#595a59', ha=ha, va=va)
+        ax.text(x, y, label, fontsize=7.0, fontweight='bold', color='#595a59', ha=ha, va=va)
 
     ax.axis('off')
-    ax.set_xlim(-140, 140)
-    ax.set_ylim(-140, 140)
+    ax.set_xlim(-145, 145)
+    ax.set_ylim(-130, 130)
     
     from matplotlib.lines import Line2D
     legend_handles = [
         Patch(facecolor='#cdb663', alpha=1.0,  label='Sehr gut'),
         Patch(facecolor='#2cb7b9', alpha=1.0,  label='Gut'),
-        Patch(facecolor='#ffffff', edgecolor='#595a59', alpha=1.0,  label='Zu verbessern'),
+        Patch(facecolor='#ffffff', edgecolor='#cccccc', alpha=1.0,  label='Zu verbessern'),
         Patch(facecolor='#595a59', alpha=1.0,  label='Schwach'),
-        Line2D([0], [0], color='#1a1a1a', lw=2, label='Daten Sportler'),
-        Line2D([0], [0], color='#595a59', lw=1.5, ls='--', label='Coaching Potential'),
+        Line2D([0], [0], color='#000000', lw=2.5, label='Daten Sportler'),
     ]
-    legend = ax.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, -0.15),
-                       ncol=3, fontsize=5, frameon=True, framealpha=0.9)
+    legend = ax.legend(
+        handles=legend_handles,
+        loc='lower center',
+        bbox_to_anchor=(0.5, -0.06),
+        ncol=5,
+        fontsize=6.4,
+        frameon=False,
+        handlelength=1.1,
+        handletextpad=0.4,
+        columnspacing=1.0,
+    )
     for text in legend.get_texts():
-        text.set_color('#595a59')
+        text.set_color('#1a1a1a')
         text.set_weight('bold')
         
     fig.patch.set_facecolor('white')
@@ -5765,12 +5799,9 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
         
         img = Image.open(tmp_radar.name)
         w_img, h_img = img.size
-        max_dim = max(w_img, h_img)
-        new_img = Image.new("RGB", (max_dim, max_dim), (255, 255, 255))
-        new_img.paste(img, ((max_dim - w_img) // 2, (max_dim - h_img) // 2))
-        new_img.save(tmp_radar.name)
-        
-        pdf.image(tmp_radar.name, x=160.1, y=155.0, w=275.0, h=275.0)
+        _w_spider_l = 320.0
+        _h_spider_l = _w_spider_l * (h_img / float(w_img))
+        pdf.image(tmp_radar.name, x=130.0, y=145.0, w=_w_spider_l, h=_h_spider_l)
         temp_files.append(tmp_radar.name)
 
     # Trainingsbereiche Table
@@ -5790,32 +5821,88 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     draw_text(437.9, 523.9, "max", size=8.3, font_style='B', color=c_dark_grey)
     draw_text(490.7, 523.9, "Ziel", size=8.3, color=c_dark_grey)
 
-    def format_pace(v):
-        if not isinstance(v, (int, float)) or v <= 0:
+    def format_pace_sec(sec_per_km):
+        if not isinstance(sec_per_km, (int, float, np.number)) or sec_per_km <= 0:
             return "-"
-        seconds_per_km = 1000.0 / v
-        minutes = int(seconds_per_km // 60)
-        seconds = int(round(seconds_per_km % 60))
+        minutes = int(sec_per_km // 60)
+        seconds = int(round(sec_per_km % 60))
         if seconds == 60:
             minutes += 1
             seconds = 0
         return f"{minutes:02d}:{seconds:02d}"
 
     def format_hr(hr_val):
-        if not isinstance(hr_val, (int, float)) or hr_val <= 0:
+        if not isinstance(hr_val, (int, float, np.number)) or hr_val <= 0:
             return "-"
-        return str(int(round(hr_val)))
+        return str(int(round(float(hr_val))))
 
-    ans_hf = 0.0
-    if not ans_row.empty:
-        try:
-            ans_hf = float(ans_row.iloc[0].get('HF', 0.0))
-        except:
-            ans_hf = 0.0
+    # Original HYCYS Excel Report Running Trainingsbereiche (DLreg, DLext, DLint, DLTempo, TText, TTint)
+    valid_hr_mask = (np.asarray(speed, dtype=float) > 0) & (np.asarray(hr, dtype=float) > 0) & (~np.isnan(np.asarray(speed, dtype=float))) & (~np.isnan(np.asarray(hr, dtype=float)))
+    valid_sp_hr = np.asarray(speed, dtype=float)[valid_hr_mask]
+    valid_hr_arr = np.asarray(hr, dtype=float)[valid_hr_mask]
 
-    zones_data = build_training_zones_variante_a(v_ltp1, hf_ltp1, v_ans, ans_hf)
+    def interp_hr_at_v(v_target):
+        if len(valid_sp_hr) == 0 or v_target <= 0:
+            return 0.0
+        if len(valid_sp_hr) == 1:
+            return float(valid_hr_arr[0])
+        if v_target <= valid_sp_hr[0]:
+            m_h = (valid_hr_arr[1] - valid_hr_arr[0]) / max(valid_sp_hr[1] - valid_sp_hr[0], 1e-6)
+            return float(valid_hr_arr[0] + m_h * (v_target - valid_sp_hr[0]))
+        if v_target >= valid_sp_hr[-1]:
+            m_h = (valid_hr_arr[-1] - valid_hr_arr[-2]) / max(valid_sp_hr[-1] - valid_sp_hr[-2], 1e-6)
+            return float(valid_hr_arr[-1] + m_h * (v_target - valid_sp_hr[-1]))
+        return float(np.interp(v_target, valid_sp_hr, valid_hr_arr))
 
-    y_coords_s5 = [536.1, 549.4, 562.7, 576.0, 602.7, 616.0]
+    if isinstance(v_ans, (int, float, np.number)) and v_ans > 0:
+        sec_68  = 1000.0 / (v_ans * 0.68)
+        sec_79  = 1000.0 / (v_ans * 0.79)
+        sec_93  = 1000.0 / (v_ans * 0.93)
+        sec_105 = 1000.0 / (v_ans * 1.05)
+        sec_123 = 1000.0 / (v_ans * 1.23)
+        sec_125 = 1000.0 / (v_ans * 1.25)
+
+        hr_76  = interp_hr_at_v(v_ans * 0.76)
+        hr_80  = interp_hr_at_v(v_ans * 0.80)
+        hr_86  = interp_hr_at_v(v_ans * 0.86)
+        hr_93  = interp_hr_at_v(v_ans * 0.93)
+        hr_96  = interp_hr_at_v(v_ans * 0.96)
+        hr_105 = interp_hr_at_v(v_ans * 1.05)
+        hr_110 = interp_hr_at_v(v_ans * 1.10)
+        hr_120 = interp_hr_at_v(v_ans * 1.20)
+        hr_123 = interp_hr_at_v(v_ans * 1.23)
+
+        zones_data = [
+            ("regenerativer Dauerlauf (DLreg)",
+             "-", format_pace_sec(sec_68), format_pace_sec(sec_68 * 1.05),
+             "-", format_hr(hr_76), format_hr(hr_76 * 0.90)),
+            ("extensiver Dauerlauf (DLext)",
+             format_pace_sec(sec_68), format_pace_sec(sec_79), format_pace_sec(((sec_68 + sec_79) / 2.0) * 0.95),
+             format_hr(hr_76), format_hr(hr_86), format_hr(hr_80)),
+            ("intensiver  Dauerlauf (DLint)",
+             format_pace_sec(sec_79), format_pace_sec(sec_93), format_pace_sec((sec_79 + sec_93) / 2.0),
+             format_hr(hr_86), format_hr(hr_96), format_hr(hr_93)),
+            ("Tempodauerlauf (DLTempo)",
+             format_pace_sec(sec_93), format_pace_sec(sec_105), format_pace_sec((sec_93 + sec_105) / 2.0),
+             format_hr(hr_96), format_hr(hr_105), format_hr((hr_96 + hr_105) / 2.0)),
+            ("extensives Tempotraining (TText)",
+             format_pace_sec(sec_105), format_pace_sec(sec_123), format_pace_sec((sec_105 + sec_123) / 2.0),
+             format_hr(hr_105), format_hr(hr_120), ""),
+            ("intensives Tempotraining (TTint)",
+             format_pace_sec(sec_123), "max", format_pace_sec(sec_125),
+             format_hr(hr_110), "max" if len(valid_sp_hr) > 0 else "-", ""),
+        ]
+    else:
+        zones_data = [
+            ("regenerativer Dauerlauf (DLreg)",  "-", "-", "-", "-", "-", "-"),
+            ("extensiver Dauerlauf (DLext)",     "-", "-", "-", "-", "-", "-"),
+            ("intensiver  Dauerlauf (DLint)",    "-", "-", "-", "-", "-", "-"),
+            ("Tempodauerlauf (DLTempo)",         "-", "-", "-", "-", "-", "-"),
+            ("extensives Tempotraining (TText)", "-", "-", "-", "-", "-", ""),
+            ("intensives Tempotraining (TTint)", "-", "-", "-", "-", "-", ""),
+        ]
+
+    y_coords_s5 = [536.1, 549.4, 562.7, 576.0, 589.3, 602.6]
     for (zn, p_min, p_max, p_zl, hr_mn, hr_mx, hr_zl), y_coord in zip(zones_data, y_coords_s5):
         draw_text(59.3, y_coord, zn, size=8.3, font_style='B', color=c_dark_grey)
         
@@ -5833,11 +5920,12 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
             draw_text(387.0, y_coord, hr_mn, size=8.3, color=c_dark_grey)
             
         draw_text(437.9, y_coord, hr_mx, size=8.3, color=c_dark_grey)
-        draw_text(490.7, y_coord, hr_zl, size=8.3, color=c_dark_grey)
+        if hr_zl:
+            draw_text(490.7, y_coord, hr_zl, size=8.3, color=c_dark_grey)
 
     for x in [212.9, 368.8, 524.7]:
-        draw_rect(x, 522.0, 0.6, 104.0, fill_color=c_dark_grey)
-    draw_rect(212.9, 625.4, 311.8, 0.6, fill_color=c_dark_grey)
+        draw_rect(x, 522.0, 0.6, 93.6, fill_color=c_dark_grey)
+    draw_rect(212.9, 615.0, 311.8, 0.6, fill_color=c_dark_grey)
 
     pdf_output = pdf.output(dest='S')
     
@@ -7504,10 +7592,10 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                         "Weitere Einheiten einblenden",
                         options=[
                             "ml/min/kg/(m/s)",
-                            "ml/km",
+                            "L/km",
                         ],
                         default=[],
-                        key="lauf_re_optional_units_v3",
+                        key="lauf_re_optional_units_v4",
                     )
 
                 st.markdown("**Messwerte je Stufe**")
@@ -7520,8 +7608,8 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     }
                     if "ml/min/kg/(m/s)" in optional_re_units:
                         row_dict['ml/min/kg/(m/s)'] = f"{r['re_ml_min_kg_ms']:.2f}".replace('.', ',') if r['re_ml_min_kg_ms'] is not None else '-'
-                    if "ml/km" in optional_re_units:
-                        row_dict['ml/km'] = f"{r['re_ml_km']:.0f}".replace('.', ',') if r['re_ml_km'] is not None else '-'
+                    if "L/km" in optional_re_units:
+                        row_dict['L/km'] = f"{r['re_l_km']:.2f}".replace('.', ',') if r['re_l_km'] is not None else '-'
                     display_records.append(row_dict)
 
                 df_lauf_display = pd.DataFrame(display_records)
@@ -7689,9 +7777,9 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     go.Bar(
                         x=x_labels,
                         y=re_ist_vals,
-                        name="Ist-Verbrauch [l/km]",
+                        name="Ist-Verbrauch [L/km]",
                         marker=dict(color="#2cb7b9", line=dict(color="#1d8f91", width=1)),
-                        text=[f"{v:.2f} l/km".replace(".", ",") for v in re_ist_vals],
+                        text=[f"{v:.2f} L/km".replace(".", ",") for v in re_ist_vals],
                         textposition="outside",
                         textfont=dict(size=11, color="#1a1a1a", family="Arial"),
                     )
@@ -7701,7 +7789,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                         go.Bar(
                             x=x_labels,
                             y=re_pot_vals,
-                            name=f"Potenzial ({re_pot_pct} %) [l/km]",
+                            name=f"Potenzial ({re_pot_pct} %) [L/km]",
                             marker=dict(color="#cdb663", line=dict(color="#a69043", width=1)),
                             text=[
                                 f"<b>{pv:.2f}</b><br><span style='font-size:10px;'>({dv:+.2f})</span>".replace(".", ",")
@@ -7716,7 +7804,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                 min_bar_y = max(0.0, min(re_pot_vals) * 0.72) if len(re_pot_vals) > 0 else 0.0
                 fig_lauf.update_layout(
                     title=dict(
-                        text="<b>Sauerstoffverbrauch pro Kilometer: Ist vs. Potenzial (RE [l/km])</b>",
+                        text="<b>Sauerstoffverbrauch pro Kilometer: Ist vs. Potenzial (RE [L/km])</b>",
                         font=dict(size=13.5, color="#1a1a1a"),
                     ),
                     barmode="group",
@@ -7724,7 +7812,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     bargroupgap=0.10,
                     xaxis=dict(title="Pace [min/km]"),
                     yaxis=dict(
-                        title=dict(text="RE [l O₂ / km]", font=dict(color="#1a1a1a")),
+                        title=dict(text="RE [L O₂ / km]", font=dict(color="#1a1a1a")),
                         range=[min_bar_y, max_bar_y * 1.18],
                         gridcolor="rgba(0,0,0,0.08)",
                     ),
