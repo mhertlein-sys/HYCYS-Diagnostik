@@ -181,22 +181,179 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- PASSWORTSCHUTZ FÜR DIE APP ---
-def check_app_password() -> bool:
-    """Prüft das App-Passwort über st.session_state (Passwort aus st.secrets['app_password'] oder Standard 'HYCYS2026')."""
-    if st.session_state.get("hycys_password_authenticated", False):
-        return True
+# --- COACH-ACCOUNTS, PASSWORTSCHUTZ & SITZUNGS-PERSISTENZ (RELOAD-SICHER + REMOTE-SUPPORT) ---
+import time
+import uuid
 
+SESSION_INACTIVITY_TIMEOUT_SEC = 12 * 3600  # 12 Stunden Inaktivitäts-Timeout
+
+# Alle freigeschalteten HYCYS-Coaches (mit Standard-Passwörtern, jederzeit über st.secrets["coach_passwords"] überschreibbar)
+DEFAULT_COACH_ACCOUNTS = {
+    "Markus Hertlein":   "Markus2026",
+    "Marius Trompetter": "MariusT2026",
+    "Susanne Traser":    "Susanne2026",
+    "Manuel Kuhnle":     "Manuel2026",
+    "Jean Surmont":      "Jean2026",
+    "Hosea Frick":       "Hosea2026",
+    "Björn Geesmann":    "Bjoern2026",
+    "Gregor Eichhorn":   "Gregor2026",
+    "Marius Rauen":      "MariusR2026",
+    "Florian Fichtl":    "Florian2026",
+}
+HYCYS_COACH_LIST = list(DEFAULT_COACH_ACCOUNTS.keys())
+ADMIN_COACHES = {"Markus Hertlein"}
+
+
+def _get_coach_passwords() -> dict:
+    """Liest die Coach-Passwörter aus DEFAULT_COACH_ACCOUNTS und überschreibt sie optional mit st.secrets['coach_passwords']."""
+    pw_map = dict(DEFAULT_COACH_ACCOUNTS)
+    try:
+        if "coach_passwords" in st.secrets:
+            for c_name, c_pw in st.secrets["coach_passwords"].items():
+                pw_map[str(c_name)] = str(c_pw)
+    except Exception:
+        pass
+    return pw_map
+
+
+def _get_master_password() -> str:
     expected_pw = "HYCYS2026"
     try:
         if "app_password" in st.secrets:
             expected_pw = str(st.secrets["app_password"])
     except Exception:
         pass
+    return expected_pw
 
-    _, col_pw, _ = st.columns([1.0, 1.2, 1.0])
+
+@st.cache_resource
+def _get_persistent_session_store() -> dict:
+    """Serverweiter In-Memory-Speicher für aktive Sitzungen (überlebt F5 / Browser-Reload und ermöglicht Remote-Support)."""
+    return {}
+
+
+_PERSIST_SKIP_PREFIXES = (
+    "FormSubmitter:",
+    "btn_",
+    "_pending_",
+    "remote_support_",
+)
+_PERSIST_SKIP_KEYS = {
+    "uploaded_file_key",
+    "uploaded_ramp_key",
+    "sprint_file_key",
+    "spiro_rampe_key",
+    "fit_rampe_key",
+    "lauftest_lac_editor_key",
+    "edited_sf_key",
+    "edited_sf_rad_key",
+    "sprint_lac_editor_key",
+    "hycys_login_form",
+}
+
+
+def save_current_session_snapshot():
+    """Speichert den aktuellen Arbeitsstand unter der URL-Session-ID (`?sid=...`), damit bei F5 nichts verloren geht."""
+    sid = st.session_state.get("_hycys_sid")
+    if not sid or not st.session_state.get("hycys_password_authenticated", False):
+        return
+    store = _get_persistent_session_store()
+    now_ts = time.time()
+    logged_coach = st.session_state.get("logged_in_coach", st.session_state.get("coach", "Markus Hertlein"))
+    data_snap = {}
+    for k, v in st.session_state.items():
+        if k in _PERSIST_SKIP_KEYS or any(str(k).startswith(p) for p in _PERSIST_SKIP_PREFIXES):
+            continue
+        if isinstance(v, (int, float, str, bool, list, dict, tuple, pd.DataFrame, np.ndarray, np.generic)) or v is None:
+            data_snap[k] = v
+    store[sid] = {
+        "last_active": now_ts,
+        "authenticated": True,
+        "coach_user": logged_coach,
+        "athlete_name": str(st.session_state.get("athlete_name", "")),
+        "sportart": str(st.session_state.get("sportart", "")),
+        "data": data_snap,
+    }
+
+
+def load_session_from_store(target_sid: str, keep_logged_in_coach: str = None) -> bool:
+    """Lädt eine bestehende Sitzung aus dem Server-Speicher in den aktuellen Browser-Tab (für F5-Reload oder Remote-Support)."""
+    store = _get_persistent_session_store()
+    if target_sid not in store:
+        return False
+    entry = store[target_sid]
+    entry["last_active"] = time.time()
+    for k_cur in list(st.session_state.keys()):
+        if k_cur not in _PERSIST_SKIP_KEYS and not any(str(k_cur).startswith(p) for p in _PERSIST_SKIP_PREFIXES):
+            try:
+                del st.session_state[k_cur]
+            except Exception:
+                pass
+    for k_saved, v_saved in entry.get("data", {}).items():
+        st.session_state[k_saved] = v_saved
+    if keep_logged_in_coach:
+        st.session_state["logged_in_coach"] = keep_logged_in_coach
+    st.session_state["_hycys_sid"] = target_sid
+    st.session_state["hycys_password_authenticated"] = True
+    try:
+        st.query_params["sid"] = target_sid
+    except Exception:
+        pass
+    return True
+
+
+def check_app_password() -> bool:
+    """
+    Prüft den Coach-Account & das Passwort und stellt bei einem Seiten-Reload (F5) den kompletten Arbeitsstand
+    anhand des URL-Parameters `?sid=...` wieder her, solange die Inaktivitätszeit (12h) nicht abgelaufen ist.
+    """
+    store = _get_persistent_session_store()
+    now_ts = time.time()
+
+    # Abgelaufene Sitzungen aufräumen
+    for k_sid in list(store.keys()):
+        if now_ts - store[k_sid].get("last_active", 0) > SESSION_INACTIVITY_TIMEOUT_SEC:
+            del store[k_sid]
+
+    # URL-Parameter ?sid=... auslesen
+    sid_from_url = None
+    try:
+        sid_from_url = st.query_params.get("sid")
+    except Exception:
+        pass
+
+    # Falls der Tab neu geladen wurde (st.session_state ist leer), aber eine gültige sid in der URL steht:
+    if not st.session_state.get("hycys_password_authenticated", False) and sid_from_url and sid_from_url in store:
+        entry = store[sid_from_url]
+        if entry.get("authenticated") and (now_ts - entry.get("last_active", 0) <= SESSION_INACTIVITY_TIMEOUT_SEC):
+            load_session_from_store(sid_from_url)
+            return True
+
+    # Falls bereits in dieser Tab-Session eingeloggt: Inaktivitäts-Timeout prüfen & Timestamp aktualisieren
+    if st.session_state.get("hycys_password_authenticated", False):
+        sid = st.session_state.get("_hycys_sid") or sid_from_url
+        if not sid:
+            sid = uuid.uuid4().hex[:16]
+            st.session_state["_hycys_sid"] = sid
+        try:
+            if st.query_params.get("sid") != sid:
+                st.query_params["sid"] = sid
+        except Exception:
+            pass
+        if sid in store and (now_ts - store[sid].get("last_active", now_ts) > SESSION_INACTIVITY_TIMEOUT_SEC):
+            del store[sid]
+            st.session_state["hycys_password_authenticated"] = False
+        else:
+            save_current_session_snapshot()
+            return True
+
+    pw_map = _get_coach_passwords()
+    master_pw = _get_master_password()
+    coach_names = list(pw_map.keys())
+
+    _, col_pw, _ = st.columns([1.0, 1.25, 1.0])
     with col_pw:
-        st.markdown("<div style='margin-top: 60px;'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='margin-top: 50px;'></div>", unsafe_allow_html=True)
         if os.path.exists("pdf_assets/page1_img3.png"):
             st.image("pdf_assets/page1_img3.png", use_container_width=True)
         else:
@@ -204,16 +361,42 @@ def check_app_password() -> bool:
 
         st.markdown(
             "<div style='text-align:center; color:#595a59; font-weight:600; margin-bottom:12px;'>"
-            "Bitte Passwort eingeben, um die Auswertungs-App zu öffnen:"
+            "Bitte Coach-Account auswählen und Passwort eingeben:"
             "</div>",
             unsafe_allow_html=True,
         )
         with st.form("hycys_login_form", clear_on_submit=False):
+            selected_coach_login = st.selectbox("Coach Account", options=coach_names)
             pw_input = st.text_input("Passwort", type="password", placeholder="Passwort eingeben...")
+            resume_existing = st.checkbox("Letzte aktive Sitzung dieses Coaches fortsetzen (falls vorhanden)", value=True)
             login_submitted = st.form_submit_button("Anmelden", type="primary", use_container_width=True)
             if login_submitted:
-                if pw_input.strip() == expected_pw:
-                    st.session_state["hycys_password_authenticated"] = True
+                expected_coach_pw = pw_map.get(selected_coach_login, master_pw)
+                if pw_input.strip() in (expected_coach_pw, master_pw):
+                    # Prüfen, ob für diesen Coach bereits eine aktive Sitzung existiert
+                    existing_coach_sid = None
+                    if resume_existing:
+                        best_ts = 0.0
+                        for k_s, v_s in store.items():
+                            if v_s.get("coach_user") == selected_coach_login and v_s.get("last_active", 0) > best_ts:
+                                best_ts = v_s.get("last_active", 0)
+                                existing_coach_sid = k_s
+
+                    if existing_coach_sid:
+                        load_session_from_store(existing_coach_sid, keep_logged_in_coach=selected_coach_login)
+                    else:
+                        new_sid = uuid.uuid4().hex[:16]
+                        st.session_state["_hycys_sid"] = new_sid
+                        st.session_state["hycys_password_authenticated"] = True
+                        st.session_state["logged_in_coach"] = selected_coach_login
+                        st.session_state["coach"] = selected_coach_login
+                        st.session_state["coach_lauft_key"] = selected_coach_login
+                        st.session_state["coach_lauft_widget"] = selected_coach_login
+                        try:
+                            st.query_params["sid"] = new_sid
+                        except Exception:
+                            pass
+                        save_current_session_snapshot()
                     st.rerun()
                 else:
                     st.error("❌ Falsches Passwort. Bitte erneut versuchen.")
@@ -2103,6 +2286,61 @@ def sync_lauftest_input_df():
             st.session_state.last_sync_params = (anzahl, start_v, v_increment)
 
 # Primary Sportart Selection (must be the very first sidebar widget)
+_active_coach_user = st.session_state.get("logged_in_coach", st.session_state.get("coach", "Markus Hertlein"))
+_cur_sid_disp = st.session_state.get("_hycys_sid", "-")
+st.sidebar.markdown(
+    f"<div style='font-size:12px; color:#595a59; background:#f4f8f8; padding:6px 10px; border-radius:5px; border-left:4px solid #2cb7b9; margin-bottom:8px;'>"
+    f"👤 <b>Coach:</b> {_active_coach_user}<br><span style='font-size:10.5px; color:#888;'>Session-ID: <code>{_cur_sid_disp}</code></span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+# Remote-Support / Sitzungs-Wechsler für Admin (Markus Hertlein) + Abmelden
+with st.sidebar.expander("🔑 Account & Remote-Support", expanded=False):
+    if st.button("Abmelden / Coach wechseln", use_container_width=True, key="btn_logout_coach_sb"):
+        st.session_state["hycys_password_authenticated"] = False
+        try:
+            if "sid" in st.query_params:
+                del st.query_params["sid"]
+        except Exception:
+            pass
+        st.rerun()
+
+    if _active_coach_user in ADMIN_COACHES:
+        st.markdown("---")
+        st.markdown("**🛠️ Remote-Support (Aktive Coach-Sitzungen):**")
+        _store_admin = _get_persistent_session_store()
+        _active_sessions_list = []
+        for _k_s, _v_s in sorted(_store_admin.items(), key=lambda x: x[1].get("last_active", 0), reverse=True):
+            _c_u = _v_s.get("coach_user", "Unbekannt")
+            _ath_u = _v_s.get("athlete_name", "-")
+            _sp_u = _v_s.get("sportart", "-")
+            _mins_ago = int(round((time.time() - _v_s.get("last_active", time.time())) / 60.0))
+            _lbl_s = f"{_c_u} | {_ath_u} ({_sp_u}) – vor {_mins_ago} Min. [{_k_s[:6]}]"
+            _active_sessions_list.append((_lbl_s, _k_s))
+
+        if _active_sessions_list:
+            _sel_lbl = st.selectbox(
+                "Aktive Sitzung auswählen",
+                options=[x[0] for x in _active_sessions_list],
+                key="remote_support_select_session",
+            )
+            _sel_sid = dict(_active_sessions_list).get(_sel_lbl)
+            if st.button("In diese Coach-Sitzung schalten", type="primary", use_container_width=True, key="btn_remote_support_join"):
+                if _sel_sid and load_session_from_store(_sel_sid, keep_logged_in_coach=_active_coach_user):
+                    st.rerun()
+        else:
+            st.caption("Aktuell keine weiteren Coach-Sitzungen aktiv.")
+
+    st.markdown("---")
+    _manual_sid_in = st.text_input("Oder Session-ID direkt öffnen:", placeholder="z. B. a8f3c9...", key="remote_support_manual_sid")
+    if st.button("Session-ID laden", use_container_width=True, key="btn_remote_support_load_sid"):
+        _clean_sid = _manual_sid_in.strip().split("sid=")[-1].split("&")[0].strip()
+        if _clean_sid and load_session_from_store(_clean_sid, keep_logged_in_coach=_active_coach_user):
+            st.rerun()
+        else:
+            st.error("Session-ID nicht gefunden oder abgelaufen.")
+
 sportart_options = ["Bitte wählen...", "Laufen", "Radsport"]
 sportart_val = st.session_state.sportart if st.session_state.sportart in sportart_options else "Bitte wählen..."
 sportart = st.sidebar.selectbox("Sportart", options=sportart_options, index=sportart_options.index(sportart_val))
@@ -2200,6 +2438,7 @@ pass
 # ------------------ CONDITIONAL SPORTART RENDERING ------------------
 if sportart == "Bitte wählen...":
     st.info("Bitte wählen Sie zuerst eine Sportart in der Sidebar aus, um mit der Auswertung zu beginnen.")
+    save_current_session_snapshot()
     st.stop()
 
 elif sportart == "Radsport":
@@ -2226,7 +2465,7 @@ elif sportart == "Radsport":
     if "lac_dist" not in st.session_state: st.session_state.lac_dist = 0.4
     if "vo2_rest" not in st.session_state: st.session_state.vo2_rest = 4.0
 
-    coach_options = ["Markus Hertlein", "Marius Trompetter", "Susanne Traser", "Manuel Kuhnle", "Billie Benkel", "Jean Surmont", "Hosea Frick", "Björn Geesmann", "Gregor Eichhorn"]
+    coach_options = list(HYCYS_COACH_LIST)
     kategorie_options = ["Hobby", "Age-Grouper", "Amateur", "Profi"]
 
     # 0. File Uploaders placed at the very top of the sidebar
@@ -3977,6 +4216,7 @@ elif sportart == "Radsport":
         st.subheader("Schritt 2: Laktatwerte eingeben")
         st.subheader("Schritt 3: Auswertung starten")
         
+    save_current_session_snapshot()
     st.stop()
 
 
@@ -4273,7 +4513,7 @@ with st.sidebar.expander("Basisdaten (*Edit)", expanded=False):
     st.session_state.gender = gender
 
     # Coach selectbox
-    coach_options = ["Markus Hertlein", "Marius Trompetter", "Susanne Traser", "Manuel Kuhnle", "Billie Benkel", "Jean Surmont", "Hosea Frick", "Björn Geesmann", "Gregor Eichhorn"]
+    coach_options = list(HYCYS_COACH_LIST)
     coach_val = st.session_state.coach
     if coach_val not in coach_options:
         coach_options = coach_options + [coach_val]
@@ -6022,7 +6262,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
     spiro_interval_sec = None   # wird beim Einlesen ermittelt (10 oder 30)
     spiro_interval_note = ""    # Hinweis bei 30s für VO2max-Anzeige
 
-    if uploaded_file is not None:
+    if uploaded_file is not None or ("lauftest_spiro_df" in st.session_state and not st.session_state.lauftest_spiro_df.empty):
         try:
             if "lauftest_spiro_df" in st.session_state and "FETT_kcal_h" in st.session_state.lauftest_spiro_df.columns:
                 spiro_df = st.session_state.lauftest_spiro_df
@@ -6278,7 +6518,9 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
             else:
                 row['HF'] = "-"
             
-            if uploaded_file is None and vo2max_override == 0:
+            if not check_lauftest_lactate(edited_df):
+                row['VLamax [mmol/l/s]'] = "Bitte Laktatwerte prüfen"
+            elif uploaded_file is None and "lauftest_spiro_df" not in st.session_state and vo2max_override == 0:
                 row['VLamax [mmol/l/s]'] = "Bitte lade eine Spirodatei hoch"
             else:
                 vla, _, _ = calculate_vlamax_for_v(res['v'], rel_vo2max, speed, vo2_steady_abs, vco2_steady_abs, weight)
@@ -6364,7 +6606,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
             """, unsafe_allow_html=True)
         
     v_fatmax = v_ans * 0.78
-    has_spiro_for_fatmax = (uploaded_file is not None) and (len(vo2_steady_abs) > 0)
+    has_spiro_for_fatmax = ((uploaded_file is not None) or ("lauftest_spiro_df" in st.session_state and not st.session_state.lauftest_spiro_df.empty)) and (len(vo2_steady_abs) > 0)
     if has_spiro_for_fatmax:
         try:
             vo2_rest_fm = 3.5 * weight
@@ -6435,7 +6677,8 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
     ans_hr_str = f"{int(round(float(hf_ans_val)))} bpm" if (isinstance(hf_ans_val, (int, float, np.number)) and pd.notna(hf_ans_val) and float(hf_ans_val) > 0) else "-"
 
     ans_vo2_pct_lauf_str = "-"
-    if uploaded_file is not None and v_ans > 0 and len(vo2_steady_values) > 0 and any(v > 0 for v in vo2_steady_values) and rel_vo2max > 0:
+    _has_spiro_loaded = (uploaded_file is not None) or ("lauftest_spiro_df" in st.session_state and not st.session_state.lauftest_spiro_df.empty)
+    if _has_spiro_loaded and v_ans > 0 and len(vo2_steady_values) > 0 and any(v > 0 for v in vo2_steady_values) and rel_vo2max > 0:
         ans_vo2_rel_top = float(np.interp(v_ans, speed, vo2_steady_values))
         ans_vo2_pct_lauf = (ans_vo2_rel_top / rel_vo2max * 100.0)
         if ans_vo2_pct_lauf > 0:
@@ -6488,7 +6731,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
     pot_vo2max = (pot_abs_vo2max_lauf / pot_weight_lauf) if pot_weight_lauf > 0 else (rel_vo2max * (1.0 + vo2_change))
     pot_vlamax = max(0.15, vla_val * (1.0 + vla_change))
 
-    has_spiro = (uploaded_file is not None) and (len(vo2_steady_abs) > 0)
+    has_spiro = _has_spiro_loaded and (len(vo2_steady_abs) > 0)
     if has_spiro:
         try:
             vo2_rest = 3.5 * weight
@@ -7998,7 +8241,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
         st.markdown("---")
         pdf_bytes = create_pdf(
             athlete_name, birthdate, test_date, st.session_state.get("diagnostik_type", "Running BLUE"), weight, body_fat_pct, rel_vo2max, df_res, fig_laktat,
-            coach, sportart, kategorie, height, speed, lactate, hr, vo2_steady_values, vo2_steady_abs, vco2_steady_abs, uploaded_file,
+            coach, sportart, kategorie, height, speed, lactate, hr, vo2_steady_values, vo2_steady_abs, vco2_steady_abs, _has_spiro_loaded,
             v_ltp1=v_ltp1_val, hf_ltp1=hf_ltp1_val
         )
 
@@ -8040,4 +8283,6 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
             key_prefix="laufen",
             excel_bytes=excel_bytes_lauf,
         )
+
+save_current_session_snapshot()
 
