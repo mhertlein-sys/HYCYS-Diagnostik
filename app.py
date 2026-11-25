@@ -181,6 +181,48 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# --- PASSWORTSCHUTZ FÜR DIE APP ---
+def check_app_password() -> bool:
+    """Prüft das App-Passwort über st.session_state (Passwort aus st.secrets['app_password'] oder Standard 'HYCYS2026')."""
+    if st.session_state.get("hycys_password_authenticated", False):
+        return True
+
+    expected_pw = "HYCYS2026"
+    try:
+        if "app_password" in st.secrets:
+            expected_pw = str(st.secrets["app_password"])
+    except Exception:
+        pass
+
+    _, col_pw, _ = st.columns([1.0, 1.2, 1.0])
+    with col_pw:
+        st.markdown("<div style='margin-top: 60px;'></div>", unsafe_allow_html=True)
+        if os.path.exists("pdf_assets/page1_img3.png"):
+            st.image("pdf_assets/page1_img3.png", use_container_width=True)
+        else:
+            st.markdown("<h2 style='text-align:center; color:#595a59;'>HYCYS Diagnostik</h2>", unsafe_allow_html=True)
+
+        st.markdown(
+            "<div style='text-align:center; color:#595a59; font-weight:600; margin-bottom:12px;'>"
+            "Bitte Passwort eingeben, um die Auswertungs-App zu öffnen:"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        with st.form("hycys_login_form", clear_on_submit=False):
+            pw_input = st.text_input("Passwort", type="password", placeholder="Passwort eingeben...")
+            login_submitted = st.form_submit_button("Anmelden", type="primary", use_container_width=True)
+            if login_submitted:
+                if pw_input.strip() == expected_pw:
+                    st.session_state["hycys_password_authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("❌ Falsches Passwort. Bitte erneut versuchen.")
+    return False
+
+
+if not check_app_password():
+    st.stop()
+
 # Initialize session state for metadata
 metadata_defaults = [
     ("athlete_name", "Michael Wagner"), 
@@ -5090,7 +5132,7 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
 
     # Lactate kinetics plot
     draw_rect(57.6, 415.0, 458.1, 10.44, fill_color=c_teal)
-    draw_text_centered(57.6 + 458.1 / 2.0, 416.1, "Interaktion Laktatauf- & abbau", size=8.2, font_style='B', color=c_white)
+    draw_text_centered(57.6 + 465.1 / 2.0, 416.1, "Interaktion Laktatauf- & abbau", size=8.2, font_style='B', color=c_white)
     
     import math
     import matplotlib.ticker as ticker
@@ -5246,8 +5288,6 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
     _s3_all_1dec = all(abs(round(float(v), 1) - round(float(v), 2)) < 0.015 for v in speed if pd.notna(v))
     for i in range(n_pdf):
         v_ms = float(speed[i])
-        if v_ans_val > 0 and v_ms > v_ans_val + 1e-6:
-            break
         lo_v = lo_pdf_list[i] if i < len(lo_pdf_list) else None
         v_fmt = f"{v_ms:.1f} m/s".replace('.', ',') if _s3_all_1dec else f"{v_ms:.2f} m/s".replace('.', ',')
         if lo_v is not None:
@@ -5521,13 +5561,16 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
             ax2.set_ylim(0, 425.0)
             y2_max = 425.0
 
-        # Fatmax bar in background (height ~72% of y1_max, turquoise fill with grey outline and white bold "Fatmax" inside top)
-        if fatmax_speed > 0 and x_lo <= fatmax_speed <= x_hi:
+        # Fatmax bar in background (height ~72% of y1_max, turquoise fill with grey outline and white bold "Fatmax" inside top).
+        # Falls Fatmax nahe am oder unter dem linken Diagrammrand liegt, den Balken vollständig ab dem linken Rand (x_lo) darstellen.
+        if fatmax_speed > 0 and fatmax_speed <= x_hi:
             x_span_e = max(x_hi - x_lo, 1e-6)
             bar_w_fm = 0.095 * x_span_e
             bar_h_fm = 0.72 * y1_max
+            bar_x0_fm = max(x_lo, min(x_hi - bar_w_fm, fatmax_speed - bar_w_fm / 2.0))
+            bar_cx_fm = bar_x0_fm + bar_w_fm / 2.0
             rect_fm = Rectangle(
-                (max(x_lo, fatmax_speed - bar_w_fm / 2.0), 0.0),
+                (bar_x0_fm, 0.0),
                 bar_w_fm,
                 bar_h_fm,
                 facecolor='#2cb7b9',
@@ -5538,7 +5581,7 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
             )
             ax.add_patch(rect_fm)
             ax.text(
-                fatmax_speed,
+                bar_cx_fm,
                 bar_h_fm - 0.045 * y1_max,
                 "Fatmax",
                 color='white',
@@ -5557,8 +5600,9 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
         x_span_e = max(x_hi - x_lo, 1e-6)
 
         # 1. 'Verbrauch von Fetten' Rechts vom Fatmax-Balken direkt über der türkisen Fettkurve (wie im Original-PDF)
-        if fatmax_speed > 0 and x_lo <= fatmax_speed <= x_hi:
-            fat_lbl_v = min(x_hi - 0.18 * x_span_e, fatmax_speed + 0.175 * x_span_e)
+        if fatmax_speed > 0 and fatmax_speed <= x_hi:
+            _fm_right_edge = max(x_lo, min(x_hi - 0.095 * x_span_e, fatmax_speed - 0.0475 * x_span_e)) + 0.095 * x_span_e
+            fat_lbl_v = min(x_hi - 0.18 * x_span_e, _fm_right_edge + 0.13 * x_span_e)
         else:
             fat_lbl_v = x_lo + 0.45 * x_span_e
         fat_at_lbl = float(np.interp(fat_lbl_v, v_vis, vis_fat))
@@ -5887,10 +5931,10 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
              format_hr(hr_96), format_hr(hr_105), format_hr((hr_96 + hr_105) / 2.0)),
             ("extensives Tempotraining (TText)",
              format_pace_sec(sec_105), format_pace_sec(sec_123), format_pace_sec((sec_105 + sec_123) / 2.0),
-             format_hr(hr_105), format_hr(hr_120), ""),
+             format_hr(hr_105), format_hr(hr_120), format_hr((hr_105 + hr_120) / 2.0)),
             ("intensives Tempotraining (TTint)",
              format_pace_sec(sec_123), "max", format_pace_sec(sec_125),
-             format_hr(hr_110), "max" if len(valid_sp_hr) > 0 else "-", ""),
+             format_hr(hr_110), "max" if len(valid_sp_hr) > 0 else "-", format_hr((hr_110 + hr_123) / 2.0)),
         ]
     else:
         zones_data = [
@@ -5898,8 +5942,8 @@ def create_pdf(athlete_name, birthdate, test_date, test_type, weight, body_fat_p
             ("extensiver Dauerlauf (DLext)",     "-", "-", "-", "-", "-", "-"),
             ("intensiver  Dauerlauf (DLint)",    "-", "-", "-", "-", "-", "-"),
             ("Tempodauerlauf (DLTempo)",         "-", "-", "-", "-", "-", "-"),
-            ("extensives Tempotraining (TText)", "-", "-", "-", "-", "-", ""),
-            ("intensives Tempotraining (TTint)", "-", "-", "-", "-", "-", ""),
+            ("extensives Tempotraining (TText)", "-", "-", "-", "-", "-", "-"),
+            ("intensives Tempotraining (TTint)", "-", "-", "-", "-", "-", "-"),
         ]
 
     y_coords_s5 = [536.1, 549.4, 562.7, 576.0, 589.3, 602.6]
