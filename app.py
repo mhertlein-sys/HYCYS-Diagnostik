@@ -178,6 +178,11 @@ st.markdown("""
     div[data-baseweb="radio"] input:focus + div {
         box-shadow: 0 0 0 0.2rem rgba(44, 183, 185, 0.25) !important;
     }
+    /* Linke Sidebar in der Defaultansicht ca. 1/5 breiter (ca. 400px statt 336px) */
+    section[data-testid="stSidebar"][aria-expanded="true"] {
+        width: 400px !important;
+        min-width: 400px !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -2287,59 +2292,70 @@ def sync_lauftest_input_df():
 
 # Primary Sportart Selection (must be the very first sidebar widget)
 _active_coach_user = st.session_state.get("logged_in_coach", st.session_state.get("coach", "Markus Hertlein"))
-_cur_sid_disp = st.session_state.get("_hycys_sid", "-")
 st.sidebar.markdown(
-    f"<div style='font-size:12px; color:#595a59; background:#f4f8f8; padding:6px 10px; border-radius:5px; border-left:4px solid #2cb7b9; margin-bottom:8px;'>"
-    f"👤 <b>Coach:</b> {_active_coach_user}<br><span style='font-size:10.5px; color:#888;'>Session-ID: <code>{_cur_sid_disp}</code></span>"
+    f"<div style='font-size:12.5px; color:#595a59; background:#f4f8f8; padding:7px 10px; border-radius:5px; border-left:4px solid #2cb7b9; margin-bottom:8px;'>"
+    f"👤 <b>Coach:</b> {_active_coach_user}"
     f"</div>",
     unsafe_allow_html=True,
 )
 
-# Remote-Support / Sitzungs-Wechsler für Admin (Markus Hertlein) + Abmelden
-with st.sidebar.expander("🔑 Account & Remote-Support", expanded=False):
-    if st.button("Abmelden / Coach wechseln", use_container_width=True, key="btn_logout_coach_sb"):
-        st.session_state["hycys_password_authenticated"] = False
-        try:
-            if "sid" in st.query_params:
-                del st.query_params["sid"]
-        except Exception:
-            pass
-        st.rerun()
 
-    if _active_coach_user in ADMIN_COACHES:
-        st.markdown("---")
-        st.markdown("**🛠️ Remote-Support (Aktive Coach-Sitzungen):**")
-        _store_admin = _get_persistent_session_store()
-        _active_sessions_list = []
-        for _k_s, _v_s in sorted(_store_admin.items(), key=lambda x: x[1].get("last_active", 0), reverse=True):
-            _c_u = _v_s.get("coach_user", "Unbekannt")
-            _ath_u = _v_s.get("athlete_name", "-")
-            _sp_u = _v_s.get("sportart", "-")
-            _mins_ago = int(round((time.time() - _v_s.get("last_active", time.time())) / 60.0))
-            _lbl_s = f"{_c_u} | {_ath_u} ({_sp_u}) – vor {_mins_ago} Min. [{_k_s[:6]}]"
-            _active_sessions_list.append((_lbl_s, _k_s))
-
-        if _active_sessions_list:
-            _sel_lbl = st.selectbox(
-                "Aktive Sitzung auswählen",
-                options=[x[0] for x in _active_sessions_list],
-                key="remote_support_select_session",
-            )
-            _sel_sid = dict(_active_sessions_list).get(_sel_lbl)
-            if st.button("In diese Coach-Sitzung schalten", type="primary", use_container_width=True, key="btn_remote_support_join"):
-                if _sel_sid and load_session_from_store(_sel_sid, keep_logged_in_coach=_active_coach_user):
-                    st.rerun()
-        else:
-            st.caption("Aktuell keine weiteren Coach-Sitzungen aktiv.")
-
-    st.markdown("---")
-    _manual_sid_in = st.text_input("Oder Session-ID direkt öffnen:", placeholder="z. B. a8f3c9...", key="remote_support_manual_sid")
-    if st.button("Session-ID laden", use_container_width=True, key="btn_remote_support_load_sid"):
-        _clean_sid = _manual_sid_in.strip().split("sid=")[-1].split("&")[0].strip()
-        if _clean_sid and load_session_from_store(_clean_sid, keep_logged_in_coach=_active_coach_user):
+def render_sidebar_account_and_remote_support(key_suffix: str = "main"):
+    """Rendert ganz unten in der Sidebar (unter 'Auswertung starten') den Account-Bereich inkl. Session-ID & Remote-Support."""
+    _cur_coach = st.session_state.get("logged_in_coach", st.session_state.get("coach", "Markus Hertlein"))
+    _cur_sid = st.session_state.get("_hycys_sid", "-")
+    with st.sidebar.expander("🔑 Account & Remote-Support", expanded=False):
+        st.markdown(
+            f"<div style='font-size:11.5px; color:#595a59; margin-bottom:8px;'>"
+            f"<b>Eingeloggt als:</b> {_cur_coach}<br>"
+            f"<b>Session-ID:</b> <code>{_cur_sid}</code>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Abmelden / Coach wechseln", use_container_width=True, key=f"btn_logout_coach_{key_suffix}"):
+            st.session_state["hycys_password_authenticated"] = False
+            try:
+                if "sid" in st.query_params:
+                    del st.query_params["sid"]
+            except Exception:
+                pass
             st.rerun()
-        else:
-            st.error("Session-ID nicht gefunden oder abgelaufen.")
+
+        if _cur_coach in ADMIN_COACHES:
+            st.markdown("---")
+            st.markdown("**🛠️ Remote-Support (Aktive Coach-Sitzungen):**")
+            _store_admin = _get_persistent_session_store()
+            _active_sessions_list = []
+            for _k_s, _v_s in sorted(_store_admin.items(), key=lambda x: x[1].get("last_active", 0), reverse=True):
+                _c_u = _v_s.get("coach_user", "Unbekannt")
+                _ath_u = _v_s.get("athlete_name", "-")
+                _sp_u = _v_s.get("sportart", "-")
+                _mins_ago = int(round((time.time() - _v_s.get("last_active", time.time())) / 60.0))
+                _lbl_s = f"{_c_u} | {_ath_u} ({_sp_u}) – vor {_mins_ago} Min. [{_k_s[:6]}]"
+                _active_sessions_list.append((_lbl_s, _k_s))
+
+            if _active_sessions_list:
+                _sel_lbl = st.selectbox(
+                    "Aktive Sitzung auswählen",
+                    options=[x[0] for x in _active_sessions_list],
+                    key=f"remote_support_select_session_{key_suffix}",
+                )
+                _sel_sid = dict(_active_sessions_list).get(_sel_lbl)
+                if st.button("In diese Coach-Sitzung schalten", type="primary", use_container_width=True, key=f"btn_remote_support_join_{key_suffix}"):
+                    if _sel_sid and load_session_from_store(_sel_sid, keep_logged_in_coach=_cur_coach):
+                        st.rerun()
+            else:
+                st.caption("Aktuell keine weiteren Coach-Sitzungen aktiv.")
+
+        st.markdown("---")
+        _manual_sid_in = st.text_input("Oder Session-ID direkt öffnen:", placeholder="z. B. a8f3c9...", key=f"remote_support_manual_sid_{key_suffix}")
+        if st.button("Session-ID laden", use_container_width=True, key=f"btn_remote_support_load_sid_{key_suffix}"):
+            _clean_sid = _manual_sid_in.strip().split("sid=")[-1].split("&")[0].strip()
+            if _clean_sid and load_session_from_store(_clean_sid, keep_logged_in_coach=_cur_coach):
+                st.rerun()
+            else:
+                st.error("Session-ID nicht gefunden oder abgelaufen.")
+
 
 sportart_options = ["Bitte wählen...", "Laufen", "Radsport"]
 sportart_val = st.session_state.sportart if st.session_state.sportart in sportart_options else "Bitte wählen..."
@@ -2437,6 +2453,7 @@ pass
 
 # ------------------ CONDITIONAL SPORTART RENDERING ------------------
 if sportart == "Bitte wählen...":
+    render_sidebar_account_and_remote_support("init")
     st.info("Bitte wählen Sie zuerst eine Sportart in der Sidebar aus, um mit der Auswertung zu beginnen.")
     save_current_session_snapshot()
     st.stop()
@@ -2750,9 +2767,6 @@ elif sportart == "Radsport":
             weight = st.number_input("Gewicht (kg)", value=float(st.session_state.weight), step=0.1, format="%.1f")
             st.session_state.weight = round(weight, 1)
 
-            body_fat_pct = st.number_input("Körperfett (%)", value=float(st.session_state.body_fat_pct), step=0.1, format="%.1f")
-            st.session_state.body_fat_pct = round(body_fat_pct, 1)
-
             coach_val = st.session_state.coach
             if coach_val not in coach_options:
                 coach_options = coach_options + [coach_val]
@@ -2776,21 +2790,25 @@ elif sportart == "Radsport":
                 diag_type_val = "Cycling BLUE"
             diagnostik_type = st.selectbox("Diagnostik Typ", options=diag_type_options, index=diag_type_options.index(diag_type_val))
             st.session_state.diagnostik_type = diagnostik_type
-            
-            # Körperfettmessung (Parizkova 10-Falten)
-            with st.expander("Körperfettmessung (Parizkova 10-Falten)"):
-                if "df_sf" not in st.session_state:
-                    sf_names = ["Wange", "Kinn", "Achselfalte vorn", "10. Rippe", "Bauch (Nabel)", "Spina illiaca", "Oberschenkel", "Rücken", "Triceps", "Wade"]
-                    st.session_state.df_sf = pd.DataFrame({"Falte": sf_names, "M1": [0.0]*10, "M2": [0.0]*10, "M3": [0.0]*10})
-                edited_sf = st.data_editor(
-                    st.session_state.df_sf,
-                    hide_index=True,
-                    width='stretch',
-                    key="edited_sf_rad_key"
-                )
 
-        # 2. Sprinttest Expander (Default collapsed)
-        with st.expander("Sprinttest", expanded=False):
+        # 2. Körperfettwerte Expander (eigenes Feld unter Basisdaten und oberhalb von Sprinttest Laktatwerte)
+        with st.expander("Körperfettwerte", expanded=False):
+            body_fat_pct = st.number_input("Körperfett (%)", value=float(st.session_state.body_fat_pct), step=0.1, format="%.1f")
+            st.session_state.body_fat_pct = round(body_fat_pct, 1)
+
+            st.caption("Körperfettmessung (Parizkova 10-Falten):")
+            if "df_sf" not in st.session_state:
+                sf_names = ["Wange", "Kinn", "Achselfalte vorn", "10. Rippe", "Bauch (Nabel)", "Spina illiaca", "Oberschenkel", "Rücken", "Triceps", "Wade"]
+                st.session_state.df_sf = pd.DataFrame({"Falte": sf_names, "M1": [0.0]*10, "M2": [0.0]*10, "M3": [0.0]*10})
+            edited_sf = st.data_editor(
+                st.session_state.df_sf,
+                hide_index=True,
+                width='stretch',
+                key="edited_sf_rad_key"
+            )
+
+        # 3. Sprinttest Laktatwerte Expander (Default collapsed)
+        with st.expander("Sprinttest Laktatwerte", expanded=False):
             # Laktatwerte Sprint
             st.subheader("Laktatwerte Sprint")
             if "df_sprint_lac" not in st.session_state:
@@ -2914,6 +2932,8 @@ elif sportart == "Radsport":
                 st.session_state.rad_kf_warnung_offen = False
                 st.session_state.rad_kf_dialog_trigger = False
                 st.session_state.rad_auswertung_gestartet = True
+
+    render_sidebar_account_and_remote_support("rad")
 
     if st.session_state.get("rad_kf_warnung_offen", False):
         if hasattr(st, "dialog"):
@@ -4476,7 +4496,7 @@ if "df_sf" in st.session_state:
         st.session_state.body_fat_pct = max(0.0, round(calculated_bf, 1))
 
 # 3. Basisdaten (collapsed expander)
-with st.sidebar.expander("Basisdaten (*Edit)", expanded=False):
+with st.sidebar.expander("Basisdaten", expanded=False):
     athlete_name = st.text_input("Name", value=st.session_state.athlete_name, key="athlete_name_lauft_widget")
     st.session_state.athlete_name = athlete_name
 
@@ -4493,10 +4513,6 @@ with st.sidebar.expander("Basisdaten (*Edit)", expanded=False):
     # Gewicht (float, 1 decimal)
     weight = st.number_input("Gewicht (kg)", value=float(st.session_state.weight), step=0.1, format="%.1f", key="weight_lauft_widget")
     st.session_state.weight = round(weight, 1)
-
-    # Körperfett (%) (float, 1 decimal)
-    body_fat_pct = st.number_input("Körperfett (%)", value=float(st.session_state.body_fat_pct), step=0.1, format="%.1f", key="bf_lauft_widget")
-    st.session_state.body_fat_pct = round(body_fat_pct, 1)
 
     # Kategorie selectbox
     kategorie_options = ["Hobby", "Age-Grouper", "Amateur", "Profi"]
@@ -4527,14 +4543,18 @@ with st.sidebar.expander("Basisdaten (*Edit)", expanded=False):
     diagnostik_type = st.selectbox("Diagnostik Typ", options=diag_type_options, index=diag_type_options.index(diag_type_val), key="diagnostik_type_lauft_widget")
     st.session_state.diagnostik_type = diagnostik_type
 
-    # Körperfettmessung (Parizkova 10-Falten)
-    with st.expander("Körperfettmessung (Parizkova 10-Falten)"):
-        edited_sf = st.data_editor(
-            st.session_state.df_sf,
-            hide_index=True,
-            width='stretch',
-            key="edited_sf_key"
-        )
+# 3b. Körperfettwerte (eigenes Feld unter Basisdaten und oberhalb von Stufentest Laktat)
+with st.sidebar.expander("Körperfettwerte", expanded=False):
+    body_fat_pct = st.number_input("Körperfett (%)", value=float(st.session_state.body_fat_pct), step=0.1, format="%.1f", key="bf_lauft_widget")
+    st.session_state.body_fat_pct = round(body_fat_pct, 1)
+
+    st.caption("Körperfettmessung (Parizkova 10-Falten):")
+    edited_sf = st.data_editor(
+        st.session_state.df_sf,
+        hide_index=True,
+        width='stretch',
+        key="edited_sf_key"
+    )
 
 # 4. Stufentest Laktat (collapsed expander)
 sync_lauftest_input_df()
@@ -4637,6 +4657,7 @@ with st.sidebar.expander("Spiro-Fenster Feineinstellung", expanded=False):
 
 st.sidebar.markdown("---")
 start_button = st.sidebar.button("Auswertung starten", type="primary")
+render_sidebar_account_and_remote_support("lauf")
 
 def check_lauftest_lactate(df):
     lac_series = pd.to_numeric(df["Laktat"], errors="coerce")
