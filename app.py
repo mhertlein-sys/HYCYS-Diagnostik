@@ -651,6 +651,13 @@ def create_hycys_excel_lauf(
     ws["B21"] = diag_str if diag_str.upper().startswith("HYCYS") else f"HYCYS {diag_str}"
 
     # Parizkova 10-Falten (B28:D37) & Körperfett (G31)
+    # Erst die Beispiel-Hautfalten aus der Vorlage leeren
+    for idx in range(10):
+        r_excel = 28 + idx
+        ws.cell(r_excel, 2, None)
+        ws.cell(r_excel, 3, None)
+        ws.cell(r_excel, 4, None)
+
     sf_sum = 0.0
     if df_sf is not None and not df_sf.empty:
         for idx in range(min(10, len(df_sf))):
@@ -658,30 +665,42 @@ def create_hycys_excel_lauf(
             m1 = float(pd.to_numeric(df_sf.iloc[idx].get("M1", 0.0), errors="coerce") or 0.0)
             m2 = float(pd.to_numeric(df_sf.iloc[idx].get("M2", 0.0), errors="coerce") or 0.0)
             m3 = float(pd.to_numeric(df_sf.iloc[idx].get("M3", 0.0), errors="coerce") or 0.0)
-            ws.cell(r_excel, 2, m1)
-            ws.cell(r_excel, 3, m2)
-            ws.cell(r_excel, 4, m3)
+            if m1 > 0 or m2 > 0 or m3 > 0:
+                ws.cell(r_excel, 2, m1)
+                ws.cell(r_excel, 3, m2)
+                ws.cell(r_excel, 4, m3)
             sf_sum += (m1 + m2 + m3) / 3.0
     if sf_sum > 0:
         ws["G31"] = "=(22.32*LOG10(G28)-29.2)"
     else:
-        ws["G31"] = float(body_fat_pct)
+        ws["G31"] = float(body_fat_pct) if body_fat_pct and float(body_fat_pct) > 0 else 0.0
 
-    # HFmax (M31)
+    # HFmax (M31) & HF-Overrides in Spalte M (M8:M29)
+    # In der Vorlage stehen in M8, M9, M24:M26, M28, M29, M31 hartkodierte HF-Beispielwerte von Tom Lange!
     valid_hrs = [float(h) for h in hr if pd.notna(h) and float(h) > 0]
     if valid_hrs:
         ws["M31"] = int(round(max(valid_hrs)))
+        for r_m in range(8, 30):
+            if r_m != 27:
+                ws[f"M{r_m}"] = f"=L{r_m}"
+    else:
+        ws["M31"] = None
+        for r_m in range(8, 30):
+            ws[f"M{r_m}"] = None
 
     # Stufentest Laktat & HF (A42:C50)
-    ws["B42"] = float(ruhe_lac) if pd.notna(ruhe_lac) else 0.8
-    ws["C42"] = int(round(float(ruhe_hr))) if pd.notna(ruhe_hr) and float(ruhe_hr) > 0 else 70
+    # Nur tatsächlich eingegebene Stufen und HF-Werte schreiben (keine Default-Ruhe-HF 70 und keine 5. Stufe aus der Vorlage!)
+    ws["B42"] = float(ruhe_lac) if pd.notna(ruhe_lac) and float(ruhe_lac) > 0 else None
+    ws["C42"] = int(round(float(ruhe_hr))) if pd.notna(ruhe_hr) and float(ruhe_hr) > 0 else None
 
     for idx in range(8):
         r_stage = 43 + idx
-        if idx < len(speed):
+        if idx < len(speed) and pd.notna(speed[idx]) and float(speed[idx]) > 0:
             ws.cell(r_stage, 1, float(speed[idx]))
-            ws.cell(r_stage, 2, float(lactate[idx]) if idx < len(lactate) and pd.notna(lactate[idx]) else None)
-            ws.cell(r_stage, 3, int(round(float(hr[idx]))) if idx < len(hr) and pd.notna(hr[idx]) else None)
+            lac_v = float(lactate[idx]) if idx < len(lactate) and pd.notna(lactate[idx]) else None
+            hr_v = int(round(float(hr[idx]))) if idx < len(hr) and pd.notna(hr[idx]) and float(hr[idx]) > 0 else None
+            ws.cell(r_stage, 2, lac_v)
+            ws.cell(r_stage, 3, hr_v)
         else:
             ws.cell(r_stage, 1, None)
             ws.cell(r_stage, 2, None)
@@ -732,19 +751,28 @@ def create_hycys_excel_lauf(
         ws["V56"] = float(abs_vo2max)
 
     # Steady-State VO2 & VCO2 je Stufe in 'Calculation Spirometrie' (M8:N15) übertragen,
-    # damit 'Calculation Physiologie' exakt mit den App-Stufenfenstern übereinstimmt
-    if "Calculation Spirometrie" in wb.sheetnames and vo2_steady_abs:
+    # damit 'Calculation Physiologie' exakt mit den App-Stufenfenstern übereinstimmt.
+    # Gleichzeitig die fest verdrahteten Rohdaten-Verweise in A8:H42 leeren, damit keine
+    # 5. Stufe aus der Vorlage (D27:E30 = Eingabedaten!109:112) stehen bleibt.
+    if "Calculation Spirometrie" in wb.sheetnames:
         ws_cs = wb["Calculation Spirometrie"]
+        for r_clear_cs in range(9, 43):
+            for c_clear_cs in range(1, 9):
+                ws_cs.cell(r_clear_cs, c_clear_cs, None)
+        n_valid_stages = len(speed)
         for idx in range(8):
             r_cs = 8 + idx
-            if idx < len(vo2_steady_abs) and vo2_steady_abs[idx] > 0:
+            if idx < n_valid_stages and vo2_steady_abs and idx < len(vo2_steady_abs) and vo2_steady_abs[idx] > 0:
+                ws_cs.cell(r_cs, 10, float(speed[idx]))           # Spalte J: v [m/s]
+                ws_cs.cell(r_cs, 11, None)                        # Spalte K: BF
+                ws_cs.cell(r_cs, 12, None)                        # Spalte L: VT
                 ws_cs.cell(r_cs, 13, float(vo2_steady_abs[idx]))  # Spalte M: VO2
                 vco2_v = float(vco2_steady_abs[idx]) if idx < len(vco2_steady_abs) and vco2_steady_abs[idx] > 0 else 0.0
-                if vco2_v > 0:
-                    ws_cs.cell(r_cs, 14, vco2_v)  # Spalte N: VCO2
+                ws_cs.cell(r_cs, 14, vco2_v if vco2_v > 0 else None)  # Spalte N: VCO2
+                ws_cs.cell(r_cs, 15, None)                        # Spalte O: Laktat
             else:
-                ws_cs.cell(r_cs, 13, None)
-                ws_cs.cell(r_cs, 14, None)
+                for c_cs in (10, 11, 12, 13, 14, 15):
+                    ws_cs.cell(r_cs, c_cs, None)
 
     out_buf = io.BytesIO()
     wb.save(out_buf)
@@ -3550,7 +3578,7 @@ elif sportart == "Radsport":
         col_rad_chart_u, col_rad_khm_u = st.columns([1.95, 1.05])
         with col_rad_chart_u:
             st.markdown("<h3 style='text-align: center; margin-bottom: 6px;'>Fett & Kohlenhydrat Stoffwechsel</h3>", unsafe_allow_html=True)
-            _c_v2_rad, _c_km_rad, _c_sp_rad = st.columns([1.35, 1.05, 1.25])
+            _c_v2_rad, _c_km_rad = st.columns([1.35, 1.25])
             with _c_v2_rad:
                 show_v2_galibier_rad = st.checkbox(
                     "Version 2 - Galibier (AI Diagnostics) einblenden",
@@ -3564,14 +3592,6 @@ elif sportart == "Radsport":
                     disabled=not show_v2_galibier_rad,
                     key="show_v2_km_band_rad",
                 )
-            with _c_sp_rad:
-                show_spiro_met_rad = False
-                if len(rad_spiro_p_meas) >= 2:
-                    show_spiro_met_rad = st.checkbox(
-                        "Version 3 - Gemessen Spiro einblenden",
-                        value=False,
-                        key="show_spiro_met_rad",
-                    )
 
         with col_rad_khm_u:
             st.markdown("<h3 style='text-align: center; margin-bottom: 6px;'>KH-Match</h3>", unsafe_allow_html=True)
@@ -3758,61 +3778,6 @@ elif sportart == "Radsport":
                         hovertemplate="KH (Version 2 - Galibier (AI Diagnostics)): <b>%{customdata[3]} g/h KH</b> (%{customdata[4]} kcal/h · %{customdata[5]} %)<extra></extra>",
                         yaxis="y2",
                     ))
-
-                # Version 3 - Gemessen Spiro Kurven für Radsport
-                if show_spiro_met_rad and len(rad_spiro_p_meas) >= 2:
-                    from scipy.interpolate import PchipInterpolator
-                    _rp_arr = np.array(rad_spiro_p_meas, dtype=float)
-                    _rf_arr = np.array(rad_spiro_fett_meas, dtype=float)
-                    _rk_arr = np.array(rad_spiro_kh_meas, dtype=float)
-                    _rp_u, _ru_idx = np.unique(_rp_arr, return_index=True)
-                    _rf_u = _rf_arr[_ru_idx]
-                    _rk_u = _rk_arr[_ru_idx]
-                    if len(_rp_u) >= 2:
-                        _rp_mask = (p_vals_r >= float(_rp_u[0])) & (p_vals_r <= float(_rp_u[-1]))
-                        _rp_smooth = p_vals_r[_rp_mask] if np.sum(_rp_mask) >= 5 else np.linspace(float(_rp_u[0]), float(_rp_u[-1]), 100)
-                        _rf_smooth = np.clip(PchipInterpolator(_rp_u, _rf_u)(_rp_smooth), 0.0, None)
-                        _rk_smooth = np.clip(PchipInterpolator(_rp_u, _rk_u)(_rp_smooth), 0.0, None)
-                        _rsp_hover = np.column_stack([
-                            [f"{val / 9.3:.1f}".replace(".", ",") for val in _rf_smooth],
-                            [f"{int(round(val))}" for val in _rf_smooth],
-                            [f"{val:.1f}".replace(".", ",") for val in _rk_smooth],
-                            [f"{int(round(val * 4.063))}" for val in _rk_smooth],
-                        ])
-                        fig_met_u.add_trace(go.Scatter(
-                            x=_rp_smooth, y=_rf_smooth,
-                            mode="lines",
-                            line=dict(color="#11696b", width=3, dash="dash"),
-                            name="Fett: Version 3 - Gemessen Spiro [kcal/h]",
-                            customdata=_rsp_hover,
-                            hovertemplate="Fett (Version 3 - Gemessen Spiro): <b>%{customdata[0]} g/h Fett</b> (%{customdata[1]} kcal/h)<extra></extra>",
-                            yaxis="y",
-                        ))
-                        fig_met_u.add_trace(go.Scatter(
-                            x=_rp_u, y=_rf_u,
-                            mode="markers",
-                            marker=dict(symbol="circle", size=7.5, color="#11696b", line=dict(width=1.5, color="#ffffff")),
-                            showlegend=False,
-                            hoverinfo="skip",
-                            yaxis="y",
-                        ))
-                        fig_met_u.add_trace(go.Scatter(
-                            x=_rp_smooth, y=_rk_smooth,
-                            mode="lines",
-                            line=dict(color="#8c7322", width=3, dash="dash"),
-                            name="KH: Version 3 - Gemessen Spiro [g/h]",
-                            customdata=_rsp_hover,
-                            hovertemplate="KH (Version 3 - Gemessen Spiro): <b>%{customdata[2]} g/h KH</b> (%{customdata[3]} kcal/h)<extra></extra>",
-                            yaxis="y2",
-                        ))
-                        fig_met_u.add_trace(go.Scatter(
-                            x=_rp_u, y=_rk_u,
-                            mode="markers",
-                            marker=dict(symbol="circle", size=7.5, color="#8c7322", line=dict(width=1.5, color="#ffffff")),
-                            showlegend=False,
-                            hoverinfo="skip",
-                            yaxis="y2",
-                        ))
                 if 0 < fatmax_power <= int(p_vals_r[-1]):
                     _fm_half_w_r = max(20.0, float(p_vals_r[-1]) * 0.055)
                     _fm_x0_r = max(0.0, float(fatmax_power) - _fm_half_w_r)
@@ -4267,6 +4232,59 @@ if "_pending_lauft_widget_sync" in st.session_state:
 def _on_sidebar_thresh_change():
     st.session_state.selected_threshold_model = st.session_state.selected_threshold_model_widget
 
+def detect_spiro_rest_end(df_spiro, default_vorlauf=60):
+    """
+    Erkennt das Ende der Ruhephase (den letzten Zeitpunkt der Ruhephase unmittelbar
+    vor dem ersten signifikanten VO2-Anstieg zu Beginn der 1. Belastungsstufe).
+    Standardablauf: 30s Warmlaufen der Spiro, 60s Ruhephase (Aufzeichnung startet
+    meist ab 00:00:30 bis 00:01:00 = 60s), danach erster signifikanter VO2-Anstieg.
+    Gilt identisch für das 5-Minuten- und das 3-Minuten-Stufenprotokoll.
+    """
+    if df_spiro is None or len(df_spiro) < 4:
+        return int(default_vorlauf)
+    sub = df_spiro[['Time', 'VO2']].dropna().reset_index(drop=True)
+    if len(sub) < 4:
+        return int(default_vorlauf)
+    early = sub[sub['Time'] <= 150.0].reset_index(drop=True)
+    rest_pts = early[early['VO2'] < 650.0]
+    if len(rest_pts) == 0:
+        return int(default_vorlauf)
+    base_vo2 = float(rest_pts['VO2'].iloc[:min(3, len(rest_pts))].mean())
+    t_rest_end = float(rest_pts['Time'].iloc[-1])
+    for k in range(1, len(early)):
+        v_k = float(early['VO2'].iloc[k])
+        v_next = float(early['VO2'].iloc[min(k + 1, len(early) - 1)])
+        if v_k > max(base_vo2 + 100.0, base_vo2 * 1.25) and v_next > max(base_vo2 + 250.0, base_vo2 * 1.60):
+            t_rest_end = float(early['Time'].iloc[k - 1])
+            break
+    return int(round(t_rest_end))
+
+
+def detect_spiro_stage_ends(df_spiro, anzahl, stufendauer_min=None, pausendauer_sec=None, vorlauf_sec=None):
+    """
+    Platziert die Stufenfenster ausgehend vom Ende der Ruhephase (unmittelbar vor dem
+    ersten signifikanten VO2-Anstieg) durch Aufaddieren von Stufendauer
+    (5 min = 300s beim Standardprotokoll bzw. 3 min = 180s beim neuen 3min-Protokoll)
+    und Pausendauer (30s):
+      Ende Stufe i (1-basiert) = t_rest_end + i * stage_sec + (i - 1) * pause_sec
+      - 5min-Protokoll (t_rest_end=60s): 360s, 690s, 1020s, 1350s, 1680s, ...
+      - 3min-Protokoll (t_rest_end=60s): 240s, 450s, 660s, 870s, 1080s, 1290s, 1500s, 1710s, ...
+    """
+    if df_spiro is None or len(df_spiro) < 6:
+        return []
+    if stufendauer_min is None:
+        stufendauer_min = float(st.session_state.get("stufendauer", 5.0))
+    if pausendauer_sec is None:
+        pausendauer_sec = int(st.session_state.get("pausendauer", 30))
+    default_vorlauf = int(vorlauf_sec) if vorlauf_sec is not None else int(st.session_state.get("vorlauf", 60))
+
+    t_rest_end = float(detect_spiro_rest_end(df_spiro, default_vorlauf=default_vorlauf))
+    stage_sec = float(stufendauer_min) * 60.0
+    pause_sec = float(pausendauer_sec)
+
+    return [float(t_rest_end + (i + 1) * stage_sec + i * pause_sec) for i in range(int(anzahl))]
+
+
 def _on_test_type_change():
     new_tt = st.session_state.get("test_type_lauft_widget", st.session_state.get("last_test_type"))
     st.session_state.last_test_type = new_tt
@@ -4290,13 +4308,24 @@ def _on_test_type_change():
     st.session_state.vorlauf_lauft_widget = st.session_state.vorlauf
     st.session_state.pausendauer_lauft_widget = st.session_state.pausendauer
 
+    if "lauftest_spiro_df" in st.session_state and not st.session_state.lauftest_spiro_df.empty:
+        _det_rest = detect_spiro_rest_end(st.session_state.lauftest_spiro_df, default_vorlauf=60)
+        st.session_state.vorlauf = _det_rest
+        st.session_state.vorlauf_lauft_widget = _det_rest
+        st.session_state.detected_stage_ends = detect_spiro_stage_ends(
+            st.session_state.lauftest_spiro_df,
+            20,
+            stufendauer_min=float(st.session_state.stufendauer),
+            pausendauer_sec=int(st.session_state.pausendauer),
+            vorlauf_sec=_det_rest,
+        )
     if "df_lauftest_input" in st.session_state:
         del st.session_state["df_lauftest_input"]
     if "lauftest_lac_editor_key" in st.session_state:
         del st.session_state["lauftest_lac_editor_key"]
     st.session_state.lauf_auswertung_gestartet = False
     for key in list(st.session_state.keys()):
-        if key.startswith("lauftest_end_t_") or key.startswith("lauftest_offset_"):
+        if key.startswith("lauftest_end_t_") or key.startswith("lauftest_offset_") or key.startswith("lauftest_end_t_widget_"):
             del st.session_state[key]
 
 with st.sidebar.expander("Testprotokoll", expanded=False):
@@ -4338,46 +4367,6 @@ with st.sidebar.expander("Testprotokoll", expanded=False):
         st.session_state.pausendauer = pausendauer
         
         ausbelastung = st.checkbox("Test bis zur Ausbelastung", value=True, key="ausbelastung_lauft_widget")
-
-def detect_spiro_stage_ends(df_spiro, anzahl):
-    n_rows = len(df_spiro)
-    if n_rows < 10:
-        return []
-    t_diffs = df_spiro['Time'].diff().dropna()
-    dt = t_diffs.median() if len(t_diffs) > 0 else 10.0
-    step_30s = max(1, int(round(30.0 / dt)))
-    step_60s = max(step_30s, int(round(60.0 / dt)))
-    drops = []
-    for i in range(n_rows - step_30s):
-        t1 = float(df_spiro['Time'].iloc[i])
-        vo2_1 = float(df_spiro['VO2'].iloc[i])
-        if vo2_1 <= 0 or pd.isna(vo2_1):
-            continue
-        vo2_2 = float(df_spiro['VO2'].iloc[i + step_30s])
-        t2 = float(df_spiro['Time'].iloc[i + step_30s])
-        pct_drop = (vo2_1 - vo2_2) / vo2_1 if (20 <= (t2 - t1) <= 45 and pd.notna(vo2_2)) else 0.0
-        # Falls der Abfall erst im zweiten 30s-Intervall der Pause voll sichtbar wird (z. B. bei 30s-Mischkammer):
-        if i + step_60s < n_rows:
-            vo2_3 = float(df_spiro['VO2'].iloc[i + step_60s])
-            t3 = float(df_spiro['Time'].iloc[i + step_60s])
-            if 45 <= (t3 - t1) <= 75 and pd.notna(vo2_3) and vo2_2 < vo2_1 * 0.97:
-                pct_drop_60 = (vo2_1 - vo2_3) / vo2_1
-                if pct_drop_60 > pct_drop:
-                    pct_drop = pct_drop_60
-        drops.append((t1, pct_drop, vo2_1))
-    candidate_drops = [d for d in drops if d[1] > 0.15 and d[0] > 120]
-    candidate_drops.sort(key=lambda x: x[0])
-    grouped_ends = []
-    for d in candidate_drops:
-        t, pct, val = d
-        if not grouped_ends or t - grouped_ends[-1][0] > 90:
-            grouped_ends.append(d)
-        else:
-            if val > grouped_ends[-1][2]:
-                grouped_ends[-1] = d
-    detected_times = [g[0] for g in grouped_ends]
-    detected_times.sort()
-    return [float(x) for x in detected_times[:anzahl]]
 
 
 if uploaded_file is not None and uploaded_file.name != st.session_state.last_uploaded_file:
@@ -4456,18 +4445,19 @@ if uploaded_file is not None and uploaded_file.name != st.session_state.last_upl
             }).dropna(subset=['Time'])
             st.session_state.lauftest_spiro_df = spiro_df
             
-            # Detect stage ends and store in session state
-            detected = detect_spiro_stage_ends(spiro_df, 20)
+            # Ende der Ruhephase (vor erstem signifikanten VO2-Anstieg) erkennen und Stufenfenster platzieren
+            detected_vorlauf = detect_spiro_rest_end(spiro_df, default_vorlauf=int(st.session_state.get("vorlauf", 60)))
+            st.session_state.vorlauf = detected_vorlauf
+            st.session_state["_pending_lauft_widget_sync"] = {"vorlauf_lauft_widget": detected_vorlauf}
+            detected = detect_spiro_stage_ends(
+                spiro_df,
+                20,
+                stufendauer_min=float(st.session_state.get("stufendauer", 5.0)),
+                pausendauer_sec=int(st.session_state.get("pausendauer", 30)),
+                vorlauf_sec=detected_vorlauf,
+            )
             if detected:
                 st.session_state.detected_stage_ends = detected
-                if len(detected) >= 2:
-                    med_interval = float(np.median(np.diff(detected)))
-                    if 280.0 <= med_interval <= 380.0:
-                        st.session_state.stufendauer = 5.0
-                        st.session_state["_pending_lauft_widget_sync"] = {"stufendauer_lauft_widget": 5.0}
-                    elif 170.0 <= med_interval <= 250.0:
-                        st.session_state.stufendauer = 3.0
-                        st.session_state["_pending_lauft_widget_sync"] = {"stufendauer_lauft_widget": 3.0}
             else:
                 if "detected_stage_ends" in st.session_state:
                     del st.session_state.detected_stage_ends
@@ -4476,7 +4466,7 @@ if uploaded_file is not None and uploaded_file.name != st.session_state.last_upl
 
         # Reset manual end times and offsets
         for key in list(st.session_state.keys()):
-            if key.startswith("lauftest_end_t_") or key.startswith("lauftest_offset_"):
+            if key.startswith("lauftest_end_t_") or key.startswith("lauftest_offset_") or key.startswith("lauftest_end_t_widget_"):
                 del st.session_state[key]
 
         # Reset started flag
@@ -4595,8 +4585,21 @@ with st.sidebar.expander("Spiro-Fenster Feineinstellung", expanded=False):
         vorlauf = int(st.session_state.vorlauf)
         interval = stage_sec + pause_sec
 
-        if "detected_stage_ends" not in st.session_state and "lauftest_spiro_df" in st.session_state:
-            _det = detect_spiro_stage_ends(st.session_state.lauftest_spiro_df, 20)
+        _cur_proto_sig = (int(vorlauf), int(stage_sec), int(pause_sec))
+        if st.session_state.get("_last_spiro_proto_sig") != _cur_proto_sig:
+            st.session_state["_last_spiro_proto_sig"] = _cur_proto_sig
+            for _k in list(st.session_state.keys()):
+                if _k.startswith("lauftest_end_t_") or _k.startswith("lauftest_end_t_widget_"):
+                    del st.session_state[_k]
+
+        if "lauftest_spiro_df" in st.session_state and not st.session_state.lauftest_spiro_df.empty:
+            _det = detect_spiro_stage_ends(
+                st.session_state.lauftest_spiro_df,
+                20,
+                stufendauer_min=float(st.session_state.stufendauer),
+                pausendauer_sec=int(st.session_state.pausendauer),
+                vorlauf_sec=vorlauf,
+            )
             if _det:
                 st.session_state.detected_stage_ends = _det
 
@@ -4660,16 +4663,22 @@ start_button = st.sidebar.button("Auswertung starten", type="primary")
 render_sidebar_account_and_remote_support("lauf")
 
 def check_lauftest_lactate(df):
-    lac_series = pd.to_numeric(df["Laktat"], errors="coerce")
-    if len(df) > 1:
-        return not lac_series.iloc[1:].isna().any()
-    return not lac_series.isna().any()
+    if df is None or len(df) <= 1:
+        return False
+    lac_series = pd.to_numeric(df["Laktat"].iloc[1:], errors="coerce")
+    # Mindestens 3 Belastungsstufen mit Laktatwerten müssen ausgefüllt sein
+    return int(lac_series.notna().sum()) >= 3
 
 def check_lauftest_hf_complete(df):
-    hf_series = pd.to_numeric(df["HF"], errors="coerce")
-    if len(df) > 1:
-        return not (hf_series.iloc[1:].isna() | (hf_series.iloc[1:] <= 0)).any()
-    return not (hf_series.isna() | (hf_series <= 0)).any()
+    if df is None or len(df) <= 1:
+        return False
+    lac_series = pd.to_numeric(df["Laktat"].iloc[1:], errors="coerce")
+    hf_series = pd.to_numeric(df["HF"].iloc[1:], errors="coerce")
+    active_stages = lac_series.notna()
+    if not active_stages.any():
+        return False
+    active_hf = hf_series[active_stages]
+    return not (active_hf.isna() | (active_hf <= 0)).any()
 
 if start_button:
     _sf_sum_lauf = float(edited_sf[["M1", "M2", "M3"]].mean(axis=1).sum()) if edited_sf is not None and not edited_sf.empty else 0.0
@@ -6366,7 +6375,8 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     det_med_int = float(np.median(np.diff(st.session_state.detected_stage_ends)))
                     if abs(det_med_int - float(stage_sec + pause_sec)) <= 45.0:
                         det_ends_valid = st.session_state.detected_stage_ends
-                for i in range(anzahl):
+                n_actual_stages = len(speed)
+                for i in range(n_actual_stages):
                     if i < len(det_ends_valid):
                         end_t_base = det_ends_valid[i]
                     else:
@@ -7829,7 +7839,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
         st.markdown("---")
         st.subheader("Laufökonomie")
 
-        n_stages = min(anzahl, len(vo2_steady_abs))
+        n_stages = min(len(speed), len(vo2_steady_abs))
         lo_hycys_list = calculate_laufokonomie_hycys_stages(
             speeds_arr   = list(speed[:n_stages]),
             vo2_abs_arr  = list(vo2_steady_abs[:n_stages]),
@@ -7840,7 +7850,7 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
 
         ffm_kg_re = weight * (1.0 - float(body_fat_pct) / 100.0) if weight > 0 else 0.0
         lauf_rows = []
-        for i in range(anzahl):
+        for i in range(len(speed)):
             v_ms   = speed[i]
             v_kmh  = round(v_ms * 3.6, 1)
             vo2_a  = vo2_steady_abs[i]  if i < len(vo2_steady_abs)  else 0.0
@@ -8188,12 +8198,13 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     st.write(f"- Berechnete VO2max: {rel_vo2max:.2f} ml/min/kg")
                 with col_diag2:
                     st.write("**Stufen-VO2 (relativ):**")
-                    render_centered_html_table(pd.DataFrame({"Stufe": [f"S{i+1}" for i in range(anzahl)], "VO2 rel": [f"{v:.2f}" for v in vo2_steady_values]}))
+                    render_centered_html_table(pd.DataFrame({"Stufe": [f"S{i+1}" for i in range(len(vo2_steady_values))], "VO2 rel": [f"{v:.2f}" for v in vo2_steady_values]}))
             
             st.subheader("Stufenauswertung")
             if not spiro_df.empty:
                 step_data = []
-                for i in range(anzahl):
+                n_exp_stages = min(len(speed), len(vo2_steady_abs))
+                for i in range(n_exp_stages):
                     v_ms   = speed[i]
                     pace_s = (1000.0 / v_ms) if v_ms > 0 else 0
                     pace_str = f"{int(pace_s // 60)}:{int(pace_s % 60):02d}"
@@ -8204,12 +8215,12 @@ if st.session_state.get("lauf_auswertung_gestartet", False):
                     rq_str   = f"{rq_val:.3f}" if rq_val else '-'
                     # LO via exakter HYCYS-Methodik (stages-Funktion, nur unterschwellige Stufen)
                     lo_exp_list = calculate_laufokonomie_hycys_stages(
-                        speeds_arr   = list(speed[:anzahl]),
-                        vo2_abs_arr  = list(vo2_steady_abs[:anzahl]) if len(vo2_steady_abs) >= anzahl else [0.0]*anzahl,
-                        vco2_abs_arr = list(vco2_steady_abs[:anzahl]) if len(vco2_steady_abs) >= anzahl else [0.0]*anzahl,
+                        speeds_arr   = list(speed[:n_exp_stages]),
+                        vo2_abs_arr  = list(vo2_steady_abs[:n_exp_stages]) if len(vo2_steady_abs) >= n_exp_stages else [0.0]*n_exp_stages,
+                        vco2_abs_arr = list(vco2_steady_abs[:n_exp_stages]) if len(vco2_steady_abs) >= n_exp_stages else [0.0]*n_exp_stages,
                         weight       = weight,
                         v_thresh     = v_ans if v_ans > 0 else None,
-                    ) if len(vo2_steady_abs) > 0 else [None]*anzahl
+                    ) if len(vo2_steady_abs) > 0 else [None]*n_exp_stages
                     lo_hycys = lo_exp_list[i] if i < len(lo_exp_list) else None
                     re_kg_km = (lo_hycys * 1000.0 / 60.0) if lo_hycys is not None else None
                     re_lit_kg_km = (vo2_r / (v_ms * 3.6) * 60.0) if (vo2_r > 0 and v_ms > 0) else None
