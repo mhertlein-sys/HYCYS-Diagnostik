@@ -202,7 +202,7 @@ DEFAULT_COACH_ACCOUNTS = {
     "Hosea Frick":       "Hosea2026",
     "Björn Geesmann":    "Bjoern2026",
     "Gregor Eichhorn":   "Gregor2026",
-    "Marius Rauen":      "MariusR2026",
+    "Marius Dickmann":   "MariusD2026",
     "Florian Fichtl":    "Florian2026",
 }
 HYCYS_COACH_LIST = list(DEFAULT_COACH_ACCOUNTS.keys())
